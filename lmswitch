@@ -59,14 +59,17 @@ def model_size_and_present(rel, runtime):
         if not os.path.isdir(full):
             return 0, False
         total = 0
+        has_weights = False  # present only once real weight shards exist (not mid-download)
         for dp, _, files in os.walk(full):
             for fn in files:
+                if fn.endswith(".safetensors"):
+                    has_weights = True
                 fp = os.path.join(dp, fn)
                 if os.path.isfile(fp) and not os.path.islink(fp):
                     total += os.path.getsize(fp)
                 elif os.path.islink(fp) and os.path.exists(fp):
                     total += os.path.getsize(os.path.realpath(fp))
-        return total, True
+        return total, has_weights
     # GGUF (llama.cpp)
     if not os.path.exists(full):
         return 0, False
@@ -182,6 +185,8 @@ def render(models):
     name_w = max(max(len(m["name"]) for m in models), 4)
     loaded = [m for m in models if m["loaded"]]
     total_loaded = sum(m["size"] for m in loaded)
+    downloaded = [m for m in models if m["present"]]
+    total_disk = sum(m["size"] for m in downloaded)
 
     print()
     ram = ram_line()
@@ -192,6 +197,8 @@ def render(models):
               + c(f"{avail:.0f}Gi available", "32"))
         print("  Models: " + c(f"~{human(total_loaded)} resident", "1")
               + f" across {len(loaded)} loaded  (of {len(models)} total)")
+        print("  Disk:   " + c(human(total_disk), "1")
+              + f" across {len(downloaded)} downloaded  (of {len(models)} total)")
     print("  " + c("● loaded", "32") + "   " + c("○ stopped", "2")
           + "      " + c("✓ downloaded", "32") + "   "
           + c("✗ missing", "31"))
