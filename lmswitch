@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""lmswitch — list / toggle local LLMs served from ~/.config/llama-models/*.env
+
+  lmswitch                 show the table of all models (default, read-only)
+  lmswitch on  <name|#>    start a model (llama-server via systemd, or vLLM in docker)
+  lmswitch off <name|#>    stop a model
+
+Env files use LLAMA_MODEL / LLAMA_PORT / LLAMA_CTX / LLAMA_DISPLAY_NAME, plus
+RUNTIME=vllm for safetensors models served through the vllm-model@ unit.
+Model paths resolve under ~/models/<LLAMA_MODEL>; GGUF entries are files
+(multipart shards summed), vLLM entries are directories.
+"""
+import os
+import re
+import sys
+import glob
+import json
+import subprocess
+
+HOME = os.path.expanduser("~")
+ENV_DIR = os.path.join(HOME, ".config/llama-models")
+MODELS = os.path.join(HOME, "models")
+OPENCODE = os.path.join(HOME, ".config/opencode/opencode.json")
+OPENCODE_EXPORT = os.path.join(HOME, ".local/share/opencode-export/opencode.json")
+SPARK_HOST = "spark-8912.local"
+
+TTY = sys.stdout.isatty()
+
+
+def c(text, code):
+    return f"\033[{code}m{text}\033[0m" if TTY else text
+
+
+def parse_env(path):
+    d = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            d[k.strip()] = v.strip().strip('"').strip("'")
+    return d
+
+
+def human(nbytes):
+    if nbytes <= 0:
+        return "-"
+    gb = nbytes / 1024**3
+    if gb >= 1000:
+        return f"{gb/1024:.1f}T"
+    return f"{gb:.1f}G"
+
+
+def model_size_and_present(rel, runtime):
+    """Return (bytes, present) for a model path relative to ~/models."""
+    full = os.path.join(MODELS, rel)
+    if runtime == "vllm":
+        if not os.path.isdir(full):
+            return 0, False
+        total = 0
+        for dp, _, files in os.walk(full):
+            for fn in files:
+                fp = os.path.join(dp, fn)
+                if os.path.isfile(fp) and not os.path.islink(fp):
+                    total += os.path.getsize(fp)
+                elif os.path.islink(fp) and os.path.exists(fp):
+                    total += os.path.getsize(os.path.realpath(fp))
+        return total, True
+    # GGUF (llama.cpp)
+    if not os.path.exists(full):
+        return 0, False
+    m = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", full)
+    if m:
+        pattern = re.sub(r"-\d{5}-of-\d{5}\.gguf$",
+                         f"-*-of-{m.group(2)}.gguf", full)
+        files = [f for f in glob.glob(pattern) if os.path.isfile(f)]
+        return sum(os.path.getsize(f) for f in files), True
+    return os.path.getsize(full), True
+
+
+def listening_ports():
+    ports = set()
+    try:
+        out = subprocess.check_output(["ss", "-tlnH"], text=True,
+                                      stderr=subprocess.DEVNULL)
+    except Exception:
+        return ports
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            port = parts[3].rsplit(":", 1)[-1]
+            if port.isdigit():
+                ports.add(int(port))
+    return ports
+
+
+def ram_line():
+    info = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":", 1)
+                info[k] = int(v.strip().split()[0])  # kB
+    except Exception:
+        return ""
+    total = info.get("MemTotal", 0) / 1024**2
+    avail = info.get("MemAvailable", 0) / 1024**2
+    used = total - avail
+    return (total, used, avail)
+
+
+# Ordered family rules: first matching keyword (checked against the env name) wins.
+# Qwen is listed before Kimi so "qwen3.6-kimi-distill" groups under Qwen, not Kimi.
+FAMILY_RULES = [
+    ("Qwen", ("qwen", "qwopus")),
+    ("Gemma", ("diffusiongemma", "gemma")),
+    ("DeepSeek", ("deepseek",)),
+    ("Nemotron", ("nemotron",)),
+    ("Kimi", ("kimi",)),
+    ("GPT-OSS", ("gpt-oss", "gpt")),
+    ("GLM", ("glm",)),
+    ("Nex", ("nex",)),
+    ("Step", ("step",)),
+]
+
+
+def family(name):
+    low = name.lower()
+    for i, (label, keys) in enumerate(FAMILY_RULES):
+        if any(k in low for k in keys):
+            return i, label
+    return len(FAMILY_RULES), "Other"
+
+
+def load_models():
+    models = []
+    if not os.path.isdir(ENV_DIR):
+        return models
+    for path in sorted(glob.glob(os.path.join(ENV_DIR, "*.env"))):
+        name = os.path.basename(path)[:-4]
+        env = parse_env(path)
+        runtime = env.get("RUNTIME", "llama")
+        rel = env.get("LLAMA_MODEL", "")
+        size, present = model_size_and_present(rel, runtime)
+        try:
+            port = int(env.get("LLAMA_PORT", "0"))
+        except ValueError:
+            port = 0
+        fam_order, fam_label = family(name)
+        models.append({
+            "name": name,
+            "display": env.get("LLAMA_DISPLAY_NAME", name),
+            "runtime": runtime,
+            "type": "vllm" if runtime == "vllm" else "gguf",
+            "port": port,
+            "ctx": env.get("LLAMA_CTX", ""),
+            "size": size,
+            "present": present,
+            "family": fam_label,
+            "fam_order": fam_order,
+        })
+    models.sort(key=lambda m: (m["fam_order"], m["name"]))
+    return models
+
+
+def unit_active(name, runtime):
+    unit = f"vllm-model@{name}" if runtime == "vllm" else f"llama-model@{name}"
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit],
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
+
+
+def annotate(models):
+    ports = listening_ports()
+    for m in models:
+        m["loaded"] = m["port"] in ports and m["port"] != 0
+    return models
+
+
+def render(models):
+    name_w = max(max(len(m["name"]) for m in models), 4)
+    loaded = [m for m in models if m["loaded"]]
+    total_loaded = sum(m["size"] for m in loaded)
+
+    print()
+    ram = ram_line()
+    if ram:
+        total, used, avail = ram
+        print(f"  RAM:    {total:.0f}Gi total  |  "
+              + c(f"{used:.0f}Gi used", "33") + "  |  "
+              + c(f"{avail:.0f}Gi available", "32"))
+        print("  Models: " + c(f"~{human(total_loaded)} resident", "1")
+              + f" across {len(loaded)} loaded  (of {len(models)} total)")
+    print("  " + c("● loaded", "32") + "   " + c("○ stopped", "2")
+          + "      " + c("✓ downloaded", "32") + "   "
+          + c("✗ missing", "31"))
+    print()
+    header = (f"  {'#':>2}  S  {'TYPE':<5}  {'NAME':<{name_w}}  "
+              f"{'SIZE':>7}  DL  {'PORT':>5}  DISPLAY")
+    print(c(header, "1"))
+
+    rule_w = name_w + 30
+    cur_family = None
+    for i, m in enumerate(models, 1):
+        if m["family"] != cur_family:
+            cur_family = m["family"]
+            label = f" {cur_family} "
+            print(c("  " + label + "─" * (rule_w - len(label)), "36"))
+        dot = c("●", "32") if m["loaded"] else c("○", "2")
+        dl = c("✓", "32") if m["present"] else c("✗", "31")
+        port = str(m["port"]) if m["port"] else "-"
+        size = human(m["size"])
+        name = f"{m['name']:<{name_w}}"  # pad first, color after, to keep alignment
+        disp = m["display"]
+        if m["loaded"]:
+            name = c(name, "1")
+            disp = c(disp, "32")
+        elif not m["present"]:
+            name = c(name, "2")
+            disp = c(disp, "2")
+        print(f"  {i:>2}  {dot}  {m['type']:<5}  {name}  "
+              f"{size:>7}  {dl}  {port:>5}  {disp}")
+    print()
+
+
+def show():
+    models = annotate(load_models())
+    if not models:
+        print(f"No models found in {ENV_DIR}")
+        return
+    if not TTY:
+        render(models)
+        return
+    # Interactive: list, then accept one or more numbers to flip on/off.
+    while True:
+        models = annotate(load_models())
+        render(models)
+        try:
+            choice = input("  Toggle # (space/comma separated, or q to quit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice.lower() in ("q", "quit", "exit", ""):
+            return
+        # Accept several at once: "8 9 7", "8,9,7", "8-9-7" all work.
+        nums = [int(t) for t in re.split(r"[^0-9]+", choice) if t]
+        if not nums or any(not (1 <= n <= len(models)) for n in nums):
+            print(f"  ? enter 1-{len(models)} (one or more, e.g. 8 9 24) or q\n")
+            continue
+        # Snapshot each target's state now, so toggling is based on what was shown.
+        for n in nums:
+            m = models[n - 1]
+            toggle(m["name"], "off" if m["loaded"] else "on")
+        print()
+
+
+def resolve(target):
+    """Resolve a name or 1-based index to a model name."""
+    models = load_models()
+    if target.isdigit():
+        idx = int(target)
+        if 1 <= idx <= len(models):
+            return models[idx - 1]["name"]
+        sys.exit(f"No model #{target} (1-{len(models)})")
+    if os.path.isfile(os.path.join(ENV_DIR, target + ".env")):
+        return target
+    sys.exit(f"Unknown model: {target}")
+
+
+def toggle(target, action):
+    name = resolve(target)
+    env = parse_env(os.path.join(ENV_DIR, name + ".env"))
+    runtime = env.get("RUNTIME", "llama")
+    unit = f"vllm-model@{name}" if runtime == "vllm" else f"llama-model@{name}"
+    verb = "start" if action == "on" else "stop"
+    print(f"{verb.capitalize()}ing {name} ({runtime}) on port "
+          f"{env.get('LLAMA_PORT', '?')} ...")
+    r = subprocess.run(["systemctl", "--user", verb, unit])
+    if r.returncode != 0:
+        sys.exit(f"systemctl {verb} {unit} failed")
+    regen_opencode()
+    if action == "on":
+        print(c(f"  ↑ {name} starting — serves on "
+                f"{env.get('LLAMA_PORT', '?')} once the weights finish loading.", "32"))
+    else:
+        print(c(f"  ↓ {name} stopped.", "2"))
+
+
+def regen_opencode():
+    """Rebuild opencode.json provider list from currently-loaded models."""
+    if not os.path.isfile(OPENCODE):
+        return
+    try:
+        with open(OPENCODE) as f:
+            cfg = json.load(f)
+    except Exception:
+        return
+    ports = listening_ports()
+    providers = {}
+    for m in load_models():
+        # Only advertise a model whose port is actually serving. The unit being
+        # "active" is not enough: vllm units use RemainAfterExit, so the unit
+        # stays active even after the container crashes — advertising a dead
+        # endpoint to opencode. The listening port is the only honest signal.
+        if m["port"] == 0 or m["port"] not in ports:
+            continue
+        # Both llama and vllm are served from the spark on 0.0.0.0; opencode runs
+        # on the Mac and reaches them over the LAN, so always use the spark host.
+        base = f"http://{SPARK_HOST}:{m['port']}/v1"
+        suffix = " (Spark)"
+        try:
+            ctx = int(m["ctx"]) if m["ctx"] else 65536
+        except ValueError:
+            ctx = 65536
+        providers[m["name"]] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": m["display"] + suffix,
+            "options": {"baseURL": base},
+            "models": {
+                m["name"]: {
+                    "name": m["display"],
+                    "limit": {"context": ctx, "output": 8192},
+                }
+            },
+        }
+    cfg["provider"] = providers
+    tmp = OPENCODE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, OPENCODE)
+    # Best-effort: stage for the Mac pull-sync (systemd opencode-export serves this).
+    if os.path.isdir(os.path.dirname(OPENCODE_EXPORT)):
+        try:
+            with open(OPENCODE_EXPORT, "w") as f:
+                json.dump(cfg, f, indent=2)
+                f.write("\n")
+        except Exception:
+            pass
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("list", "status", "ls"):
+        show()
+    elif args[0] in ("on", "start") and len(args) == 2:
+        toggle(args[1], "on")
+    elif args[0] in ("off", "stop") and len(args) == 2:
+        toggle(args[1], "off")
+    elif args[0] == "sync":
+        regen_opencode()
+        print("opencode.json synced to currently-serving models.")
+    else:
+        sys.exit("Usage: lmswitch [list | on <name|#> | off <name|#> | sync]")
+
+
+if __name__ == "__main__":
+    main()
