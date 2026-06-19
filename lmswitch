@@ -336,7 +336,13 @@ def regen_opencode():
     # prompt for approval on every tool call. Set on each regen so the block is
     # always present even if the file was created fresh.
     cfg["permission"] = {
-        "read": "allow",
+        "read": {
+            "*": "allow",
+            "*.env": "deny",
+            "*.env.*": "deny",
+            "*.env.example": "allow",
+            "*.env.mocknet": "allow",
+        },
         "edit": "allow",
         "glob": "allow",
         "grep": "allow",
