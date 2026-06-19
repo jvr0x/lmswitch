@@ -332,6 +332,24 @@ def regen_opencode():
             },
         }
     cfg["provider"] = providers
+    # Run opencode with the same low-friction permissions as Claude Code: don't
+    # prompt for approval on every tool call. Set on each regen so the block is
+    # always present even if the file was created fresh.
+    cfg["permission"] = {
+        "read": "allow",
+        "edit": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "bash": "ask",
+        "task": "allow",
+        "external_directory": "allow",
+        "todowrite": "allow",
+        "question": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "lsp": "allow",
+        "skill": "allow",
+    }
     tmp = OPENCODE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(cfg, f, indent=2)
