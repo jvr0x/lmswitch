@@ -296,13 +296,19 @@ def toggle(target, action):
 
 def regen_opencode():
     """Rebuild opencode.json provider list from currently-loaded models."""
-    if not os.path.isfile(OPENCODE):
-        return
-    try:
-        with open(OPENCODE) as f:
-            cfg = json.load(f)
-    except Exception:
-        return
+    # Preserve any extra top-level keys an existing file may carry, but never
+    # depend on the file being present or well-formed: a missing or corrupt
+    # config is rebuilt from scratch so lmswitch always produces a full config.
+    cfg = {}
+    if os.path.isfile(OPENCODE):
+        try:
+            with open(OPENCODE) as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+    # Always assert the schema + Warp plugin so they survive a fresh/rebuilt file.
+    cfg["$schema"] = "https://opencode.ai/config.json"
+    cfg["plugin"] = ["@warp-dot-dev/opencode-warp"]
     ports = listening_ports()
     providers = {}
     for m in load_models():
