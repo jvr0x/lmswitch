@@ -1,0 +1,17 @@
+# Example lmswitch config for a GGUF model served by llama-server.
+# Copy into ai-models/<name>.yaml — the filename (minus .yaml) is the model id.
+runtime: llama                                       # "llama" = llama-server (GGUF); default if omitted
+model: "unsloth/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf"  # path relative to MODELS_DIR (~/models by default)
+port: 8085                                           # OpenAI-compatible server port
+ctx: 65536                                           # context length (--ctx-size)
+display_name: "Qwen3-4B"                             # label shown in the table and in opencode
+
+# --- optional (defaults shown) ---
+# gpu_layers: 99                                     # --n-gpu-layers (99 = offload all layers)
+# threads: 12                                        # CPU threads
+# batch: 1024                                        # --batch-size
+# ubatch: 512                                        # --ubatch-size
+# alias: qwen3-4b                                    # --alias (defaults to the model id)
+# mmproj: "path/to/mmproj.gguf"                      # multimodal projector, relative to MODELS_DIR
+# llama_bin: "/path/to/llama-server"                 # defaults to ../llama.cpp/build/bin/llama-server
+# restart: on-failure                                # opt into systemd-managed auto-restart

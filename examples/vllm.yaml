@@ -1,0 +1,27 @@
+# Example lmswitch config for a model served by vLLM in Docker.
+# Copy into ai-models/<name>.yaml — the filename (minus .yaml) is the model id,
+# the served-model-name, and the container name (vllm-<id>).
+runtime: vllm
+model: "nvidia/qwen3.6-35b-a3b-nvfp4"          # path relative to MODELS_DIR (~/models by default)
+port: 8114                                     # OpenAI-compatible server port
+ctx: 32768                                     # --max-model-len
+display_name: "Qwen3.6-35B-A3B NVFP4 (NVIDIA)" # label shown in the table and in opencode
+gpu_memory_utilization: 0.55                   # --gpu-memory-utilization
+
+# --- optional ---
+# image: "vllm/vllm-openai:cu130-nightly"      # docker image (this is the default)
+# tool_call_parser: "qwen3_coder"              # adds --enable-auto-tool-choice --tool-call-parser
+# reasoning_parser: "qwen3"                    # --reasoning-parser
+# reasoning_parser_plugin: "name"              # --reasoning-parser-plugin
+# trust_remote_code: true                      # --trust-remote-code
+# limit_mm_per_prompt: "image=4"               # --limit-mm-per-prompt
+# chat_template: "/path/template.jinja"        # --chat-template (ignored if no_chat_template set)
+# no_chat_template: true                       # skip passing --chat-template
+# attention_backend: "FLASHINFER"              # --attention-backend
+# max_num_seqs: 32                             # --max-num-seqs
+# load_format: "auto"                          # --load-format
+# enforce_eager: true                          # --enforce-eager (default: true)
+# extra_args:                                  # extra raw vLLM args, appended verbatim
+#   - "--some-flag"
+#   - "value"
+# restart: on-failure                          # opt into systemd-managed auto-restart
