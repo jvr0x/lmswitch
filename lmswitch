@@ -1,89 +1,276 @@
 #!/usr/bin/env python3
-"""lmswitch — list / toggle local LLMs served from ~/.config/llama-models/*.env
+"""lmswitch — list / toggle local LLMs from YAML configs.
 
-  lmswitch                 show the table of all models (default, read-only)
-  lmswitch on  <name|#>    start a model (llama-server via systemd, or vLLM in docker)
-  lmswitch off <name|#>    stop a model
+  lmswitch init              bootstrap ai-models/ and symlink
+  lmswitch                  interactive: list, then type numbers to toggle
+  lmswitch list             print the table (read-only)
+  lmswitch on  <name|#>     start a model
+  lmswitch off <name|#>     stop a model
+  lmswitch sync             regenerate opencode.json from serving models
+  lmswitch add  <name>      create a new YAML config interactively
+  lmswitch serve <name>     run a model in the foreground (for systemd)
 
-Env files use LLAMA_MODEL / LLAMA_PORT / LLAMA_CTX / LLAMA_DISPLAY_NAME, plus
-RUNTIME=vllm for safetensors models served through the vllm-model@ unit.
-Model paths resolve under ~/models/<LLAMA_MODEL>; GGUF entries are files
-(multipart shards summed), vLLM entries are directories.
+Config lives in <lmswitch-dir>/ai-models/*.yaml. Models can be anywhere;
+lmswitch init asks where. GGUF models run llama-server as a background
+process; vLLM models run in Docker. Per-model `restart: on-failure` opts
+into systemd-managed auto-restart.
 """
+
+from __future__ import annotations
+
 import os
 import re
 import sys
-import glob
 import json
 import subprocess
+import time
+from pathlib import Path
 
-HOME = os.path.expanduser("~")
-ENV_DIR = os.path.join(HOME, ".config/llama-models")
-MODELS = os.path.join(HOME, "models")
-OPENCODE = os.path.join(HOME, ".config/opencode/opencode.json")
-OPENCODE_EXPORT = os.path.join(HOME, ".local/share/opencode-export/opencode.json")
+# ---------------------------------------------------------------------------
+# Paths — all relative to the script's own directory so the tool is portable.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+CONF_DIR = SCRIPT_DIR / "ai-models"
+CONF_DIR.mkdir(exist_ok=True)
+RUN_DIR = CONF_DIR / "running"
+RUN_DIR.mkdir(exist_ok=True)
+CONFIG_FILE = CONF_DIR / ".lmswitch"
+
+HOME = Path.home()
+OPENCODE = HOME / ".config" / "opencode" / "opencode.json"
+OPENCODE_EXPORT = HOME / ".local" / "share" / "opencode-export" / "opencode.json"
 SPARK_HOST = "spark-8912.local"
 
 TTY = sys.stdout.isatty()
 
 
-def c(text, code):
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _c(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if TTY else text
 
 
-def parse_env(path):
-    d = {}
-    with open(path) as f:
-        for line in f:
+def _read_config() -> dict:
+    cfg: dict = {}
+    if CONFIG_FILE.exists():
+        for line in CONFIG_FILE.read_text().splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
-            k, v = line.split("=", 1)
-            d[k.strip()] = v.strip().strip('"').strip("'")
-    return d
+            k, _, v = line.partition("=")
+            cfg[k.strip()] = v.strip().strip('"').strip("'")
+    return cfg
 
 
-def human(nbytes):
+def _models_dir() -> Path:
+    cfg = _read_config()
+    raw = cfg.get("MODELS_DIR", str(HOME / "models"))
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (SCRIPT_DIR / p).resolve()
+    return p
+
+
+def _human(nbytes: int) -> str:
     if nbytes <= 0:
         return "-"
-    gb = nbytes / 1024**3
+    gb = nbytes / 1024 ** 3
     if gb >= 1000:
-        return f"{gb/1024:.1f}T"
+        return f"{gb / 1024:.1f}T"
     return f"{gb:.1f}G"
 
 
-def model_size_and_present(rel, runtime):
-    """Return (bytes, present) for a model path relative to ~/models."""
-    full = os.path.join(MODELS, rel)
+# ---------------------------------------------------------------------------
+# YAML loading — prefer pyyaml, fall back to a simple built-in parser.
+# ---------------------------------------------------------------------------
+
+def _load_yaml(path: Path) -> dict:
+    """Load a YAML file. Prefer pyyaml; fall back to a simple parser."""
+    try:
+        import yaml
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    except ImportError:
+        pass
+    return _parse_yaml_simple(path.read_text())
+
+
+def _parse_yaml_simple(text: str) -> dict:
+    """Minimal YAML parser for our config subset: scalars, lists, mappings."""
+    result: dict = {}
+    stack = [(result, -1)]
+    in_list = False
+    list_buf: list = []
+
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        raw = line.rstrip("\n\r")
+        stripped = raw.lstrip()
+        indent = len(raw) - len(stripped)
+
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+
+        while len(stack) > 1 and indent <= stack[-1][1]:
+            container, _ = stack.pop()
+            if in_list:
+                stack[-1][0].append(list_buf)
+                list_buf = []
+                in_list = False
+
+        if stripped.startswith("- "):
+            val = stripped[2:].strip()
+            if val:
+                list_buf.append(_yaml_scalar(val))
+            in_list = True
+            i += 1
+            continue
+
+        if in_list:
+            stack[-1][0].append(list_buf)
+            list_buf = []
+            in_list = False
+
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
+            key = key.strip()
+            val = val.strip()
+            if val:
+                stack[-1][0][key] = _yaml_scalar(val)
+            else:
+                new_dict: dict = {}
+                stack[-1][0][key] = new_dict
+                stack.append((new_dict, indent))
+        i += 1
+
+    if in_list:
+        stack[-1][0].append(list_buf)
+
+    return result
+
+
+def _yaml_scalar(s: str):
+    if s in ("true", "True", "yes", "on"):
+        return True
+    if s in ("false", "False", "no", "off"):
+        return False
+    if s in ("null", "~", ""):
+        return None
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        return s[1:-1]
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+
+FAMILY_RULES = [
+    ("Qwen", ("qwen", "qwopus")),
+    ("Gemma", ("diffusiongemma", "gemma")),
+    ("DeepSeek", ("deepseek",)),
+    ("Nemotron", ("nemotron",)),
+    ("Kimi", ("kimi",)),
+    ("GPT-OSS", ("gpt-oss", "gpt")),
+    ("GLM", ("glm",)),
+    ("Nex", ("nex",)),
+    ("Step", ("step",)),
+]
+
+
+def _family(name: str) -> tuple[int, str]:
+    low = name.lower()
+    for i, (label, keys) in enumerate(FAMILY_RULES):
+        if any(k in low for k in keys):
+            return i, label
+    return len(FAMILY_RULES), "Other"
+
+
+def _model_size_and_present(rel: str, runtime: str) -> tuple[int, bool]:
+    models_dir = _models_dir()
+    full = models_dir / rel
     if runtime == "vllm":
-        if not os.path.isdir(full):
+        if not full.is_dir():
             return 0, False
         total = 0
-        has_weights = False  # present only once real weight shards exist (not mid-download)
+        has_weights = False
         for dp, _, files in os.walk(full):
             for fn in files:
                 if fn.endswith(".safetensors"):
                     has_weights = True
-                fp = os.path.join(dp, fn)
-                if os.path.isfile(fp) and not os.path.islink(fp):
-                    total += os.path.getsize(fp)
-                elif os.path.islink(fp) and os.path.exists(fp):
-                    total += os.path.getsize(os.path.realpath(fp))
+                fp = Path(dp) / fn
+                if fp.is_file() and not fp.is_symlink():
+                    total += fp.stat().st_size
+                elif fp.is_symlink() and fp.exists():
+                    total += fp.resolve().stat().st_size
         return total, has_weights
-    # GGUF (llama.cpp)
-    if not os.path.exists(full):
+    # GGUF
+    if not full.exists():
         return 0, False
-    m = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", full)
+    m = re.search(r"-(\d{5})-of-(\d{5})\.gguf$", str(full))
     if m:
         pattern = re.sub(r"-\d{5}-of-\d{5}\.gguf$",
-                         f"-*-of-{m.group(2)}.gguf", full)
-        files = [f for f in glob.glob(pattern) if os.path.isfile(f)]
-        return sum(os.path.getsize(f) for f in files), True
-    return os.path.getsize(full), True
+                         f"-*-of-{m.group(2)}.gguf", str(full))
+        files = [f for f in full.parent.glob(f"*-of-{m.group(2)}.gguf") if Path(f).is_file()]
+        return sum(Path(f).stat().st_size for f in files), True
+    return full.stat().st_size, True
 
 
-def listening_ports():
-    ports = set()
+def load_models() -> list[dict]:
+    models: list[dict] = []
+    if not CONF_DIR.is_dir():
+        return models
+    for path in sorted(CONF_DIR.glob("*.yaml")):
+        name = path.stem
+        try:
+            env = _load_yaml(path)
+        except Exception as e:
+            print(f"Warning: skipping {path}: {e}", file=sys.stderr)
+            continue
+        runtime = env.get("runtime", "llama")
+        rel = env.get("model", "")
+        size, present = _model_size_and_present(rel, runtime)
+        try:
+            port = int(env.get("port", 0))
+        except (ValueError, TypeError):
+            port = 0
+        fam_order, fam_label = _family(name)
+        models.append({
+            "name": name,
+            "display": env.get("display_name", name),
+            "runtime": runtime,
+            "type": "vllm" if runtime == "vllm" else "gguf",
+            "port": port,
+            "ctx": env.get("ctx", ""),
+            "size": size,
+            "present": present,
+            "restart": env.get("restart"),
+            "family": fam_label,
+            "fam_order": fam_order,
+        })
+    models.sort(key=lambda m: (m["fam_order"], m["name"]))
+    return models
+
+
+# ---------------------------------------------------------------------------
+# Port / process detection
+# ---------------------------------------------------------------------------
+
+def _listening_ports() -> set[int]:
+    ports: set[int] = set()
     try:
         out = subprocess.check_output(["ss", "-tlnH"], text=True,
                                       stderr=subprocess.DEVNULL)
@@ -98,233 +285,519 @@ def listening_ports():
     return ports
 
 
-def ram_line():
-    info = {}
+def _docker_container(name: str) -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["docker", "ps", "--filter", f"name=^/vllm-{name}$", "--format", "{{.ID}}"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _is_running(name: str, runtime: str) -> bool:
+    if runtime == "vllm":
+        return _docker_container(name) is not None
+    pid_file = RUN_DIR / name
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    yaml_path = CONF_DIR / f"{name}.yaml"
+    if yaml_path.exists():
+        try:
+            yaml = _load_yaml(yaml_path)
+            port = int(yaml.get("port", 0))
+        except (ValueError, TypeError):
+            port = 0
+        if port and port in _listening_ports():
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# RAM info
+# ---------------------------------------------------------------------------
+
+def _ram_line() -> tuple[float, float, float] | None:
+    info: dict[str, int] = {}
     try:
         with open("/proc/meminfo") as f:
             for line in f:
                 k, v = line.split(":", 1)
-                info[k] = int(v.strip().split()[0])  # kB
+                info[k] = int(v.strip().split()[0])
     except Exception:
-        return ""
-    total = info.get("MemTotal", 0) / 1024**2
-    avail = info.get("MemAvailable", 0) / 1024**2
-    used = total - avail
-    return (total, used, avail)
+        return None
+    total = info.get("MemTotal", 0) / 1024 ** 2
+    avail = info.get("MemAvailable", 0) / 1024 ** 2
+    return total, total - avail, avail
 
 
-# Ordered family rules: first matching keyword (checked against the env name) wins.
-# Qwen is listed before Kimi so "qwen3.6-kimi-distill" groups under Qwen, not Kimi.
-FAMILY_RULES = [
-    ("Qwen", ("qwen", "qwopus")),
-    ("Gemma", ("diffusiongemma", "gemma")),
-    ("DeepSeek", ("deepseek",)),
-    ("Nemotron", ("nemotron",)),
-    ("Kimi", ("kimi",)),
-    ("GPT-OSS", ("gpt-oss", "gpt")),
-    ("GLM", ("glm",)),
-    ("Nex", ("nex",)),
-    ("Step", ("step",)),
-]
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
 
-
-def family(name):
-    low = name.lower()
-    for i, (label, keys) in enumerate(FAMILY_RULES):
-        if any(k in low for k in keys):
-            return i, label
-    return len(FAMILY_RULES), "Other"
-
-
-def load_models():
-    models = []
-    if not os.path.isdir(ENV_DIR):
-        return models
-    for path in sorted(glob.glob(os.path.join(ENV_DIR, "*.env"))):
-        name = os.path.basename(path)[:-4]
-        env = parse_env(path)
-        runtime = env.get("RUNTIME", "llama")
-        rel = env.get("LLAMA_MODEL", "")
-        size, present = model_size_and_present(rel, runtime)
-        try:
-            port = int(env.get("LLAMA_PORT", "0"))
-        except ValueError:
-            port = 0
-        fam_order, fam_label = family(name)
-        models.append({
-            "name": name,
-            "display": env.get("LLAMA_DISPLAY_NAME", name),
-            "runtime": runtime,
-            "type": "vllm" if runtime == "vllm" else "gguf",
-            "port": port,
-            "ctx": env.get("LLAMA_CTX", ""),
-            "size": size,
-            "present": present,
-            "family": fam_label,
-            "fam_order": fam_order,
-        })
-    models.sort(key=lambda m: (m["fam_order"], m["name"]))
-    return models
-
-
-def unit_active(name, runtime):
-    unit = f"vllm-model@{name}" if runtime == "vllm" else f"llama-model@{name}"
-    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit],
-                          stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode == 0
-
-
-def annotate(models):
-    ports = listening_ports()
-    for m in models:
-        m["loaded"] = m["port"] in ports and m["port"] != 0
-    return models
-
-
-def render(models):
-    name_w = max(max(len(m["name"]) for m in models), 4)
-    loaded = [m for m in models if m["loaded"]]
+def render(models: list[dict]) -> None:
+    name_w = max(max((len(m["name"]) for m in models), default=4), 4)
+    loaded = [m for m in models if _is_running(m["name"], m["runtime"])]
     total_loaded = sum(m["size"] for m in loaded)
     downloaded = [m for m in models if m["present"]]
     total_disk = sum(m["size"] for m in downloaded)
 
     print()
-    ram = ram_line()
+    ram = _ram_line()
     if ram:
         total, used, avail = ram
         print(f"  RAM:    {total:.0f}Gi total  |  "
-              + c(f"{used:.0f}Gi used", "33") + "  |  "
-              + c(f"{avail:.0f}Gi available", "32"))
-        print("  Models: " + c(f"~{human(total_loaded)} resident", "1")
+              + _c(f"{used:.0f}Gi used", "33") + "  |  "
+              + _c(f"{avail:.0f}Gi available", "32"))
+        print("  Models: " + _c(f"~{_human(total_loaded)} resident", "1")
               + f" across {len(loaded)} loaded  (of {len(models)} total)")
-        print("  Disk:   " + c(human(total_disk), "1")
+        print("  Disk:   " + _c(_human(total_disk), "1")
               + f" across {len(downloaded)} downloaded  (of {len(models)} total)")
-    print("  " + c("● loaded", "32") + "   " + c("○ stopped", "2")
-          + "      " + c("✓ downloaded", "32") + "   "
-          + c("✗ missing", "31"))
+    print("  " + _c("● loaded", "32") + "   " + _c("○ stopped", "2")
+          + "      " + _c("✓ downloaded", "32") + "   "
+          + _c("✗ missing", "31"))
+    print("  " + _c("R=restart", "36") + "   (systemd-managed)")
     print()
     header = (f"  {'#':>2}  S  {'TYPE':<5}  {'NAME':<{name_w}}  "
               f"{'SIZE':>7}  DL  {'PORT':>5}  DISPLAY")
-    print(c(header, "1"))
+    print(_c(header, "1"))
 
     rule_w = name_w + 30
     cur_family = None
     for i, m in enumerate(models, 1):
+        running = _is_running(m["name"], m["runtime"])
         if m["family"] != cur_family:
             cur_family = m["family"]
             label = f" {cur_family} "
-            print(c("  " + label + "─" * (rule_w - len(label)), "36"))
-        dot = c("●", "32") if m["loaded"] else c("○", "2")
-        dl = c("✓", "32") if m["present"] else c("✗", "31")
+            print(_c("  " + label + "─" * (rule_w - len(label)), "36"))
+        dot = _c("●", "32") if running else _c("○", "2")
+        dl = _c("✓", "32") if m["present"] else _c("✗", "31")
         port = str(m["port"]) if m["port"] else "-"
-        size = human(m["size"])
-        name = f"{m['name']:<{name_w}}"  # pad first, color after, to keep alignment
+        size = _human(m["size"])
+        name = f"{m['name']:<{name_w}}"
         disp = m["display"]
-        if m["loaded"]:
-            name = c(name, "1")
-            disp = c(disp, "32")
+        if running:
+            name = _c(name, "1")
+            disp = _c(disp, "32")
         elif not m["present"]:
-            name = c(name, "2")
-            disp = c(disp, "2")
-        print(f"  {i:>2}  {dot}  {m['type']:<5}  {name}  "
+            name = _c(name, "2")
+            disp = _c(disp, "2")
+        restart = "R" if m.get("restart") else " "
+        print(f"  {i:>2}  {dot}{restart}  {m['type']:<5}  {name}  "
               f"{size:>7}  {dl}  {port:>5}  {disp}")
     print()
 
 
-def show():
-    models = annotate(load_models())
-    if not models:
-        print(f"No models found in {ENV_DIR}")
+# ---------------------------------------------------------------------------
+# Process management
+# ---------------------------------------------------------------------------
+
+def _vllm_args(yaml: dict) -> list[str]:
+    args: list[str] = []
+    if yaml.get("enforce_eager", True):
+        args.append("--enforce-eager")
+    if yaml.get("tool_call_parser"):
+        args += ["--enable-auto-tool-choice", "--tool-call-parser",
+                 str(yaml["tool_call_parser"])]
+    if yaml.get("reasoning_parser"):
+        args.append(f"--reasoning-parser={yaml['reasoning_parser']}")
+    if yaml.get("reasoning_parser_plugin"):
+        args.append(f"--reasoning-parser-plugin={yaml['reasoning_parser_plugin']}")
+    if yaml.get("trust_remote_code"):
+        args.append("--trust-remote-code")
+    if yaml.get("limit_mm_per_prompt"):
+        args.append(f"--limit-mm-per-prompt={yaml['limit_mm_per_prompt']}")
+    if yaml.get("chat_template") and not yaml.get("no_chat_template"):
+        args.append(f"--chat-template={yaml['chat_template']}")
+    if yaml.get("attention_backend"):
+        args.append(f"--attention-backend={yaml['attention_backend']}")
+    if yaml.get("gpu_memory_utilization"):
+        args.append(f"--gpu-memory-utilization={yaml['gpu_memory_utilization']}")
+    if yaml.get("max_num_seqs"):
+        args.append(f"--max-num-seqs={yaml['max_num_seqs']}")
+    if yaml.get("load_format"):
+        args.append(f"--load-format={yaml['load_format']}")
+    for extra in yaml.get("extra_args", []) or []:
+        args.append(str(extra))
+    return args
+
+
+def start_model(name: str, yaml: dict) -> None:
+    runtime = yaml.get("runtime", "llama")
+    restart = yaml.get("restart")
+    if restart:
+        _start_systemd(name, yaml, restart)
         return
-    if not TTY:
-        render(models)
-        return
-    # Interactive: list, then accept one or more numbers to flip on/off.
-    while True:
-        models = annotate(load_models())
-        render(models)
-        try:
-            choice = input("  Toggle # (space/comma separated, or q to quit): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
-        if choice.lower() in ("q", "quit", "exit", ""):
-            return
-        # Accept several at once: "8 9 7", "8,9,7", "8-9-7" all work.
-        nums = [int(t) for t in re.split(r"[^0-9]+", choice) if t]
-        if not nums or any(not (1 <= n <= len(models)) for n in nums):
-            print(f"  ? enter 1-{len(models)} (one or more, e.g. 8 9 24) or q\n")
-            continue
-        # Snapshot each target's state now, so toggling is based on what was shown.
-        for n in nums:
-            m = models[n - 1]
-            toggle(m["name"], "off" if m["loaded"] else "on")
-        print()
-
-
-def resolve(target):
-    """Resolve a name or 1-based index to a model name."""
-    models = load_models()
-    if target.isdigit():
-        idx = int(target)
-        if 1 <= idx <= len(models):
-            return models[idx - 1]["name"]
-        sys.exit(f"No model #{target} (1-{len(models)})")
-    if os.path.isfile(os.path.join(ENV_DIR, target + ".env")):
-        return target
-    sys.exit(f"Unknown model: {target}")
-
-
-def toggle(target, action):
-    name = resolve(target)
-    env = parse_env(os.path.join(ENV_DIR, name + ".env"))
-    runtime = env.get("RUNTIME", "llama")
-    unit = f"vllm-model@{name}" if runtime == "vllm" else f"llama-model@{name}"
-    verb = "start" if action == "on" else "stop"
-    print(f"{verb.capitalize()}ing {name} ({runtime}) on port "
-          f"{env.get('LLAMA_PORT', '?')} ...")
-    r = subprocess.run(["systemctl", "--user", verb, unit])
-    if r.returncode != 0:
-        sys.exit(f"systemctl {verb} {unit} failed")
-    regen_opencode()
-    if action == "on":
-        print(c(f"  ↑ {name} starting — serves on "
-                f"{env.get('LLAMA_PORT', '?')} once the weights finish loading.", "32"))
+    if runtime == "vllm":
+        _start_vllm_direct(name, yaml)
     else:
-        print(c(f"  ↓ {name} stopped.", "2"))
+        _start_llama_direct(name, yaml)
 
 
-def regen_opencode():
-    """Rebuild opencode.json provider list from currently-loaded models."""
-    # Preserve any extra top-level keys an existing file may carry, but never
-    # depend on the file being present or well-formed: a missing or corrupt
-    # config is rebuilt from scratch so lmswitch always produces a full config.
-    cfg = {}
-    if os.path.isfile(OPENCODE):
+def _start_vllm_direct(name: str, yaml: dict) -> None:
+    existing = _docker_container(name)
+    if existing:
+        print(f"vLLM {name} already running (container {existing[:12]})")
+        return
+
+    models_dir = _models_dir()
+    model_path = models_dir / yaml["model"]
+    port = yaml.get("port", 0)
+    ctx = yaml.get("ctx", 65536)
+    gpu_mem = yaml.get("gpu_memory_utilization", 0.15)
+    image = yaml.get("image", "vllm/vllm-openai:cu130-nightly")
+    wheels = SCRIPT_DIR / "spark-vllm-docker" / "wheels"
+
+    vllm_args = _vllm_args(yaml)
+
+    cmd = [
+        "docker", "run", "-d",
+        "--name", f"vllm-{name}",
+        "--gpus", "all",
+        "--network", "host",
+        "--shm-size", "8g",
+        "--log-driver", "json-file",
+        "--log-opt", "max-size=10m",
+        "--log-opt", "max-file=3",
+        "-v", f"{model_path}:{model_path}:ro",
+        "-v", f"{HOME}/.cache/huggingface/hub:/root/.cache/huggingface/hub",
+        "-v", f"{HOME}/.cache/huggingface/token:/root/.cache/huggingface/token",
+    ]
+    if wheels.exists():
+        cmd += ["-v", f"{wheels}:/wheels:ro"]
+
+    cmd += [
+        image,
+        str(model_path),
+        f"--served-model-name={name}",
+        f"--port={port}",
+        "--host=0.0.0.0",
+        f"--max-model-len={ctx}",
+        "--max-num-seqs=32",
+        "--tensor-parallel-size=1",
+        f"--gpu-memory-utilization={gpu_mem}",
+        "--disable-log-stats",
+    ] + vllm_args
+
+    print(f"Starting vLLM {name} on port {port}...")
+    print(f"  Model: {model_path}")
+    print(f"  Image: {image}")
+    subprocess.run(cmd, check=False)
+
+    for _ in range(60):
         try:
-            with open(OPENCODE) as f:
-                cfg = json.load(f)
+            subprocess.run(
+                ["curl", "-s", f"http://localhost:{port}/v1/models"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            print(f"  Ready on port {port}")
+            return
+        except Exception:
+            time.sleep(2)
+    print("  WARNING: did not become ready in 2 minutes")
+
+
+def _start_llama_direct(name: str, yaml: dict) -> None:
+    models_dir = _models_dir()
+    model_path = models_dir / yaml["model"]
+    port = yaml.get("port", 8081)
+    ctx = yaml.get("ctx", 65536)
+    gpu_layers = yaml.get("gpu_layers", 99)
+    threads = yaml.get("threads", 12)
+    batch = yaml.get("batch", 1024)
+    ubatch = yaml.get("ubatch", 512)
+    alias = yaml.get("alias", name)
+    mmproj = yaml.get("mmproj")
+    llama_bin = yaml.get("llama_bin",
+                          str(SCRIPT_DIR.parent / "llama.cpp" / "build" / "bin" / "llama-server"))
+
+    cmd = [
+        llama_bin,
+        f"--model={model_path}",
+        f"--alias={alias}",
+        f"--port={port}",
+        "--host=0.0.0.0",
+        f"--ctx-size={ctx}",
+        f"--n-gpu-layers={gpu_layers}",
+        f"--threads={threads}",
+        f"--batch-size={batch}",
+        f"--ubatch-size={ubatch}",
+        "--log-disable",
+    ]
+    if mmproj:
+        cmd += [f"--mmproj={models_dir / mmproj}"]
+
+    print(f"Starting llama-server {name} on port {port}...")
+    print(f"  Model: {model_path}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    pid_file = RUN_DIR / name
+    pid_file.write_text(str(proc.pid))
+    print(f"  PID {proc.pid}")
+
+
+def stop_model(name: str, runtime: str) -> None:
+    if runtime == "vllm":
+        cid = _docker_container(name)
+        if cid:
+            print(f"Stopping vLLM {name} (container {cid[:12]})...")
+            subprocess.run(["docker", "stop", cid], check=False)
+            subprocess.run(["docker", "rm", cid], check=False)
+        else:
+            print(f"vLLM {name} not running")
+    else:
+        pid_file = RUN_DIR / name
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+            try:
+                os.kill(pid, 0)
+                print(f"Stopping llama-server {name} (PID {pid})...")
+                os.kill(pid, 15)
+                pid_file.unlink(missing_ok=True)
+            except (ProcessLookupError, ValueError, OSError):
+                pid_file.unlink(missing_ok=True)
+                print(f"{name} not running")
+        else:
+            print(f"{name} not running")
+
+
+# ---------------------------------------------------------------------------
+# Process management
+# ---------------------------------------------------------------------------
+
+def _vllm_args(yaml: dict) -> list[str]:
+    args: list[str] = []
+    if yaml.get("enforce_eager", True):
+        args.append("--enforce-eager")
+    if yaml.get("tool_call_parser"):
+        args += ["--enable-auto-tool-choice", "--tool-call-parser", str(yaml["tool_call_parser"])]
+    if yaml.get("reasoning_parser"):
+        args.append(f"--reasoning-parser={yaml['reasoning_parser']}")
+    if yaml.get("reasoning_parser_plugin"):
+        args.append(f"--reasoning-parser-plugin={yaml['reasoning_parser_plugin']}")
+    if yaml.get("trust_remote_code"):
+        args.append("--trust-remote-code")
+    if yaml.get("limit_mm_per_prompt"):
+        args.append(f"--limit-mm-per-prompt={yaml['limit_mm_per_prompt']}")
+    if yaml.get("chat_template") and not yaml.get("no_chat_template"):
+        args.append(f"--chat-template={yaml['chat_template']}")
+    if yaml.get("attention_backend"):
+        args.append(f"--attention-backend={yaml['attention_backend']}")
+    if yaml.get("gpu_memory_utilization"):
+        args.append(f"--gpu-memory-utilization={yaml['gpu_memory_utilization']}")
+    if yaml.get("max_num_seqs"):
+        args.append(f"--max-num-seqs={yaml['max_num_seqs']}")
+    if yaml.get("load_format"):
+        args.append(f"--load-format={yaml['load_format']}")
+    for extra in yaml.get("extra_args", []) or []:
+        args.append(str(extra))
+    return args
+
+
+def start_model(name: str, yaml: dict) -> None:
+    runtime = yaml.get("runtime", "llama")
+    restart = yaml.get("restart")
+    if restart:
+        _start_systemd(name, yaml, restart)
+        return
+    if runtime == "vllm":
+        _start_vllm_direct(name, yaml)
+    else:
+        _start_llama_direct(name, yaml)
+
+
+def _start_vllm_direct(name: str, yaml: dict) -> None:
+    existing = _docker_container(name)
+    if existing:
+        print(f"vLLM {name} already running (container {existing[:12]})")
+        return
+
+    models_dir = _models_dir()
+    model_path = models_dir / yaml["model"]
+    port = yaml.get("port", 0)
+    ctx = yaml.get("ctx", 65536)
+    gpu_mem = yaml.get("gpu_memory_utilization", 0.15)
+    image = yaml.get("image", "vllm/vllm-openai:cu130-nightly")
+    wheels = SCRIPT_DIR / "spark-vllm-docker" / "wheels"
+
+    vllm_args = _vllm_args(yaml)
+
+    cmd = [
+        "docker", "run", "-d",
+        "--name", f"vllm-{name}",
+        "--gpus", "all",
+        "--network", "host",
+        "--shm-size", "8g",
+        "--log-driver", "json-file",
+        "--log-opt", "max-size=10m",
+        "--log-opt", "max-file=3",
+        "-v", f"{model_path}:{model_path}:ro",
+        "-v", f"{HOME}/.cache/huggingface/hub:/root/.cache/huggingface/hub",
+        "-v", f"{HOME}/.cache/huggingface/token:/root/.cache/huggingface/token",
+    ]
+    if wheels.exists():
+        cmd += ["-v", f"{wheels}:/wheels:ro"]
+
+    cmd += [
+        image,
+        str(model_path),
+        f"--served-model-name={name}",
+        f"--port={port}",
+        "--host=0.0.0.0",
+        f"--max-model-len={ctx}",
+        "--max-num-seqs=32",
+        "--tensor-parallel-size=1",
+        f"--gpu-memory-utilization={gpu_mem}",
+        "--disable-log-stats",
+    ] + vllm_args
+
+    print(f"Starting vLLM {name} on port {port}...")
+    print(f"  Model: {model_path}")
+    print(f"  Image: {image}")
+    subprocess.run(cmd, check=False)
+
+    for _ in range(60):
+        try:
+            subprocess.run(
+                ["curl", "-s", f"http://localhost:{port}/v1/models"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            print(f"  Ready on port {port}")
+            return
+        except Exception:
+            time.sleep(2)
+    print("  WARNING: did not become ready in 2 minutes")
+
+
+def _start_llama_direct(name: str, yaml: dict) -> None:
+    models_dir = _models_dir()
+    model_path = models_dir / yaml["model"]
+    port = yaml.get("port", 8081)
+    ctx = yaml.get("ctx", 65536)
+    gpu_layers = yaml.get("gpu_layers", 99)
+    threads = yaml.get("threads", 12)
+    batch = yaml.get("batch", 1024)
+    ubatch = yaml.get("ubatch", 512)
+    alias = yaml.get("alias", name)
+    mmproj = yaml.get("mmproj")
+    llama_bin = yaml.get("llama_bin",
+                          str(SCRIPT_DIR.parent / "llama.cpp" / "build" / "bin" / "llama-server"))
+
+    cmd = [
+        llama_bin,
+        f"--model={model_path}",
+        f"--alias={alias}",
+        f"--port={port}",
+        "--host=0.0.0.0",
+        f"--ctx-size={ctx}",
+        f"--n-gpu-layers={gpu_layers}",
+        f"--threads={threads}",
+        f"--batch-size={batch}",
+        f"--ubatch-size={ubatch}",
+        "--log-disable",
+    ]
+    if mmproj:
+        cmd += [f"--mmproj={models_dir / mmproj}"]
+
+    print(f"Starting llama-server {name} on port {port}...")
+    print(f"  Model: {model_path}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    pid_file = RUN_DIR / name
+    pid_file.write_text(str(proc.pid))
+    print(f"  PID {proc.pid}")
+
+
+def stop_model(name: str, runtime: str) -> None:
+    if runtime == "vllm":
+        cid = _docker_container(name)
+        if cid:
+            print(f"Stopping vLLM {name} (container {cid[:12]})...")
+            subprocess.run(["docker", "stop", cid], check=False)
+            subprocess.run(["docker", "rm", cid], check=False)
+        else:
+            print(f"vLLM {name} not running")
+    else:
+        pid_file = RUN_DIR / name
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+            try:
+                os.kill(pid, 0)
+                print(f"Stopping llama-server {name} (PID {pid})...")
+                os.kill(pid, 15)
+                pid_file.unlink()
+            except (ProcessLookupError, ValueError, OSError):
+                pid_file.unlink(missing_ok=True)
+                print(f"{name} not running")
+        else:
+            print(f"{name} not running")
+
+
+# ---------------------------------------------------------------------------
+# Systemd restart (opt-in)
+# ---------------------------------------------------------------------------
+
+_SYSTEMD_UNIT = """\
+[Unit]
+Description=lmswitch serve {name}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/lmswitch serve {name}
+Restart={restart}
+RestartSec=5
+TimeoutStartSec=300
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _start_systemd(name: str, yaml: dict, restart: str) -> None:
+    unit_name = f"lmswitch@{name}.service"
+    unit_path = HOME / ".config" / "systemd" / "user" / unit_name
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(_SYSTEMD_UNIT.format(name=name, restart=restart))
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "--user", "enable", "--now", unit_name], check=False)
+    print(f"Started {name} via systemd (restart={restart})")
+
+
+# ---------------------------------------------------------------------------
+# opencode.json
+# ---------------------------------------------------------------------------
+
+def regen_opencode() -> bool:
+    if not OPENCODE.parent.exists():
+        return False
+    cfg: dict = {}
+    if OPENCODE.exists():
+        try:
+            cfg = json.loads(OPENCODE.read_text())
         except Exception:
             cfg = {}
-    # Always assert the schema + Warp plugin so they survive a fresh/rebuilt file.
     cfg["$schema"] = "https://opencode.ai/config.json"
     cfg["plugin"] = ["@warp-dot-dev/opencode-warp"]
-    ports = listening_ports()
-    providers = {}
+
+    ports = _listening_ports()
+    providers: dict = {}
     for m in load_models():
-        # Only advertise a model whose port is actually serving. The unit being
-        # "active" is not enough: vllm units use RemainAfterExit, so the unit
-        # stays active even after the container crashes — advertising a dead
-        # endpoint to opencode. The listening port is the only honest signal.
         if m["port"] == 0 or m["port"] not in ports:
             continue
-        # Both llama and vllm are served from the spark on 0.0.0.0; opencode runs
-        # on the Mac and reaches them over the LAN, so always use the spark host.
         base = f"http://{SPARK_HOST}:{m['port']}/v1"
         suffix = " (Spark)"
         try:
             ctx = int(m["ctx"]) if m["ctx"] else 65536
-        except ValueError:
+        except (ValueError, TypeError):
             ctx = 65536
         providers[m["name"]] = {
             "npm": "@ai-sdk/openai-compatible",
@@ -333,63 +806,419 @@ def regen_opencode():
             "models": {
                 m["name"]: {
                     "name": m["display"],
-                    "limit": {"context": ctx, "output": 8192},
+                    "limit": {"context": ctx, "output": min(8192, ctx)},
                 }
             },
         }
     cfg["provider"] = providers
-    # Run opencode with the same low-friction permissions as Claude Code: don't
-    # prompt for approval on every tool call. Set on each regen so the block is
-    # always present even if the file was created fresh.
     cfg["permission"] = {
-        "read": {
-            "*": "allow",
-            "*.env": "deny",
-            "*.env.*": "deny",
-            "*.env.example": "allow",
-            "*.env.mocknet": "allow",
-        },
-        "edit": "allow",
-        "glob": "allow",
-        "grep": "allow",
-        "bash": "ask",
-        "task": "allow",
-        "external_directory": "allow",
-        "todowrite": "allow",
-        "question": "allow",
-        "webfetch": "allow",
-        "websearch": "allow",
-        "lsp": "allow",
-        "skill": "allow",
+        "read": {"*": "allow", "*.env": "deny", "*.env.*": "deny",
+                 "*.env.example": "allow", "*.env.mocknet": "allow"},
+        "edit": "allow", "glob": "allow", "grep": "allow", "bash": "ask",
+        "task": "allow", "external_directory": "allow", "todowrite": "allow",
+        "question": "allow", "webfetch": "allow", "websearch": "allow",
+        "lsp": "allow", "skill": "allow",
     }
-    tmp = OPENCODE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, OPENCODE)
-    # Best-effort: stage for the Mac pull-sync (systemd opencode-export serves this).
-    if os.path.isdir(os.path.dirname(OPENCODE_EXPORT)):
+    payload = json.dumps(cfg, indent=2) + "\n"
+    if OPENCODE.exists() and OPENCODE.read_text() == payload:
+        return False
+    tmp = OPENCODE.with_suffix(".tmp")
+    tmp.write_text(payload)
+    tmp.replace(OPENCODE)
+    if OPENCODE_EXPORT.parent.exists():
         try:
-            with open(OPENCODE_EXPORT, "w") as f:
-                json.dump(cfg, f, indent=2)
-                f.write("\n")
+            OPENCODE_EXPORT.write_text(payload)
         except Exception:
             pass
+    return True
 
 
-def main():
-    args = sys.argv[1:]
-    if not args or args[0] in ("list", "status", "ls"):
-        show()
-    elif args[0] in ("on", "start") and len(args) == 2:
-        toggle(args[1], "on")
-    elif args[0] in ("off", "stop") and len(args) == 2:
-        toggle(args[1], "off")
-    elif args[0] == "sync":
-        regen_opencode()
-        print("opencode.json synced to currently-serving models.")
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_init() -> None:
+    CONF_DIR.mkdir(exist_ok=True)
+    RUN_DIR.mkdir(exist_ok=True)
+
+    try:
+        if not CONFIG_FILE.exists():
+            default_models = str(HOME / "models")
+            ans = input(f"Where are your models stored? [{default_models}] ").strip()
+            models_dir = ans or default_models
+            CONFIG_FILE.write_text(f'MODELS_DIR="{models_dir}"\n')
+            print(f"  Config written to {CONFIG_FILE}")
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        return
+
+    bin_dir = HOME / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    link = bin_dir / "lmswitch"
+    target = SCRIPT_DIR / "lmswitch"
+    if link.exists() or link.is_symlink():
+        if link.resolve() != target:
+            link.unlink()
+            link.symlink_to(target)
+            print(f"  Updated symlink: {link} -> {target}")
     else:
-        sys.exit("Usage: lmswitch [list | on <name|#> | off <name|#> | sync]")
+        link.symlink_to(target)
+        print(f"  Symlinked: {link} -> {target}")
+
+    print(f"\nDone. Config dir: {CONF_DIR}")
+    print(f"Add model configs to {CONF_DIR}/ as YAML files.")
+    print(f"Run `lmswitch add <name>` to create one interactively.")
+
+
+def cmd_list() -> None:
+    models = load_models()
+    if not models:
+        print(f"No models found in {CONF_DIR}")
+        return
+    render(models)
+
+
+def _resolve(name_or_idx: str) -> str | None:
+    if name_or_idx.isdigit():
+        idx = int(name_or_idx)
+        models = load_models()
+        if 1 <= idx <= len(models):
+            return models[idx - 1]["name"]
+        sys.exit(f"No model #{name_or_idx} (1-{len(models)})")
+    if (CONF_DIR / f"{name_or_idx}.yaml").exists():
+        return name_or_idx
+    sys.exit(f"Unknown model: {name_or_idx}")
+
+
+def cmd_on(target: str) -> None:
+    name = _resolve(target)
+    yaml_path = CONF_DIR / f"{name}.yaml"
+    yaml = _load_yaml(yaml_path)
+    runtime = yaml.get("runtime", "llama")
+    start_model(name, yaml)
+    regen_opencode()
+
+
+def cmd_off(target: str) -> None:
+    name = _resolve(target)
+    yaml_path = CONF_DIR / f"{name}.yaml"
+    yaml = _load_yaml(yaml_path)
+    runtime = yaml.get("runtime", "llama")
+    if yaml.get("restart"):
+        unit = f"lmswitch@{name}.service"
+        subprocess.run(["systemctl", "--user", "stop", unit], check=False)
+        print(f"Stopped {name} (systemd)")
+    else:
+        stop_model(name, runtime)
+    regen_opencode()
+
+
+def cmd_sync() -> None:
+    changed = regen_opencode()
+    if changed:
+        print("opencode.json updated to currently-serving models.")
+    else:
+        print("opencode.json already in sync.")
+
+
+def cmd_serve(name: str) -> None:
+    """Foreground serve — used by systemd for restart-managed models."""
+    yaml_path = CONF_DIR / f"{name}.yaml"
+    if not yaml_path.exists():
+        sys.exit(f"Config not found: {yaml_path}")
+    yaml = _load_yaml(yaml_path)
+    runtime = yaml.get("runtime", "llama")
+    if runtime == "vllm":
+        _start_vllm_foreground(name, yaml)
+    else:
+        _start_llama_direct(name, yaml)
+        while True:
+            time.sleep(1)
+
+
+def _start_vllm_foreground(name: str, yaml: dict) -> None:
+    models_dir = _models_dir()
+    model_path = models_dir / yaml["model"]
+    port = yaml.get("port", 0)
+    ctx = yaml.get("ctx", 65536)
+    gpu_mem = yaml.get("gpu_memory_utilization", 0.15)
+    image = yaml.get("image", "vllm/vllm-openai:cu130-nightly")
+    wheels = SCRIPT_DIR / "spark-vllm-docker" / "wheels"
+
+    vllm_args = _vllm_args(yaml)
+
+    cmd = [
+        "docker", "run", "--rm",
+        "--name", f"vllm-{name}",
+        "--gpus", "all",
+        "--network", "host",
+        "--shm-size", "8g",
+        "-v", f"{model_path}:{model_path}:ro",
+        "-v", f"{HOME}/.cache/huggingface/hub:/root/.cache/huggingface/hub",
+        "-v", f"{HOME}/.cache/huggingface/token:/root/.cache/huggingface/token",
+    ]
+    if wheels.exists():
+        cmd += ["-v", f"{wheels}:/wheels:ro"]
+
+    cmd += [
+        image,
+        str(model_path),
+        f"--served-model-name={name}",
+        f"--port={port}",
+        "--host=0.0.0.0",
+        f"--max-model-len={ctx}",
+        "--max-num-seqs=32",
+        "--tensor-parallel-size=1",
+        f"--gpu-memory-utilization={gpu_mem}",
+        "--disable-log-stats",
+    ] + vllm_args
+
+    print(f"Serving {name} on port {port} (systemd-managed)...")
+    os.execvp("docker", cmd)
+
+
+def cmd_migrate() -> None:
+    old_dir = HOME / ".config" / "llama-models"
+    if not old_dir.exists():
+        print(f"Nothing to migrate: {old_dir} does not exist")
+        return
+
+    KEY_MAP = {
+        "LLAMA_MODEL": "model",
+        "LLAMA_PORT": "port",
+        "LLAMA_CTX": "ctx",
+        "LLAMA_DISPLAY_NAME": "display_name",
+        "LLAMA_GPU_LAYERS": "gpu_layers",
+        "LLAMA_THREADS": "threads",
+        "LLAMA_BATCH": "batch",
+        "LLAMA_UBATCH": "ubatch",
+        "LLAMA_MMPROJ": "mmproj",
+        "LLAMA_BIN": "llama_bin",
+        "RUNTIME": "runtime",
+        "VLLM_IMAGE": "image",
+        "GPU_MEM_UTIL": "gpu_memory_utilization",
+        "VLLM_TOOL_PARSER": "tool_call_parser",
+        "VLLM_REASONING_PARSER": "reasoning_parser",
+        "VLLM_REASONING_PARSER_PLUGIN": "reasoning_parser_plugin",
+        "VLLM_TRUST_REMOTE_CODE": "trust_remote_code",
+        "VLLM_LIMIT_MM": "limit_mm_per_prompt",
+        "VLLM_NO_CHAT_TEMPLATE": "no_chat_template",
+        "VLLM_ATTENTION_BACKEND": "attention_backend",
+        "VLLM_ENFORCE_EAGER": "enforce_eager",
+        "VLLM_MAX_SEQS": "max_num_seqs",
+        "VLLM_LOAD_FORMAT": "load_format",
+    }
+
+    migrated = 0
+    skipped = 0
+    for env_file in sorted(old_dir.glob("*.env")):
+        name = env_file.stem
+        dest = CONF_DIR / f"{name}.yaml"
+        if dest.exists():
+            skipped += 1
+            continue
+
+        data: dict = {}
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip()
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+            elif val.startswith("'") and val.endswith("'"):
+                val = val[1:-1]
+            data[key] = val
+
+        if not data:
+            continue
+
+        yaml_lines: list[str] = []
+        for old_key, new_key in KEY_MAP.items():
+            if old_key in data:
+                val = data[old_key]
+                if new_key == "extra_args":
+                    if val:
+                        yaml_lines.append("extra_args:")
+                        for arg in val.split():
+                            yaml_lines.append(f'  - "{arg}"')
+                elif new_key in ("trust_remote_code", "no_chat_template", "enforce_eager"):
+                    yaml_lines.append(f"{new_key}: {val}")
+                elif new_key in ("port", "ctx", "gpu_layers", "threads", "batch", "ubatch",
+                                  "gpu_memory_utilization"):
+                    yaml_lines.append(f"{new_key}: {val}")
+                else:
+                    yaml_lines.append(f'{new_key}: "{val}"')
+
+        if "runtime" not in data:
+            yaml_lines.insert(0, "runtime: llama")
+
+        dest.write_text("\n".join(yaml_lines) + "\n")
+        migrated += 1
+        print(f"  Migrated: {name}.env -> {dest}")
+
+    print(f"\nDone. Migrated {migrated}, skipped {skipped} (already exist).")
+
+
+def cmd_add(name: str) -> None:
+    path = CONF_DIR / f"{name}.yaml"
+    if path.exists():
+        sys.exit(f"Config already exists: {path}")
+
+    try:
+        print(f"Creating config for '{name}'")
+        runtime = input("  Runtime [llama/vllm] (default: llama): ").strip() or "llama"
+        model = input("  Model path (relative to models dir): ").strip()
+        port = input("  Port (default: 8081): ").strip() or "8081"
+        ctx = input("  Context length (default: 65536): ").strip() or "65536"
+        display = input(f"  Display name (default: {name}): ").strip() or name
+
+        lines = [
+            f"runtime: {runtime}",
+            f"model: {model}",
+            f"port: {port}",
+            f"ctx: {ctx}",
+            f'display_name: "{display}"',
+        ]
+        if runtime == "vllm":
+            gpu = input("  GPU memory utilization (default: 0.15): ").strip() or "0.15"
+            lines.append(f"gpu_memory_utilization: {gpu}")
+            tp = input("  Tool call parser (e.g. hermes, qwen3_coder, empty=none): ").strip()
+            if tp:
+                lines.append(f'tool_call_parser: "{tp}"')
+            rp = input("  Reasoning parser (e.g. deepseek_r1, qwen3, empty=none): ").strip()
+            if rp:
+                lines.append(f'reasoning_parser: "{rp}"')
+            extra = input("  Extra vllm args (space-separated, empty=none): ").strip()
+            if extra:
+                lines.append("extra_args:")
+                for arg in extra.split():
+                    lines.append(f'  - "{arg}"')
+            restart = input("  Restart on failure? [y/N]: ").strip().lower()
+            if restart == "y":
+                lines.append('restart: "on-failure"')
+
+        path.write_text("\n".join(lines) + "\n")
+        print(f"\n  Written: {path}")
+    except KeyboardInterrupt:
+        print("\nAborted.")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+_HELP = """\
+lmswitch — list and toggle local LLMs from YAML configs.
+
+Configs live in <lmswitch-dir>/ai-models/*.yaml. GGUF models run llama-server
+as a background process; vLLM models run in Docker. Per-model restart: on-failure
+opts into systemd-managed auto-restart.
+
+Usage:
+  lmswitch                  interactive TUI: list models, type numbers to toggle
+  lmswitch list             print the model table (read-only)
+  lmswitch on  <name|#>     start a model
+  lmswitch off <name|#>     stop a model
+  lmswitch sync             regenerate opencode.json from currently-serving models
+  lmswitch init             bootstrap ai-models/ dir, config, and symlink
+  lmswitch add  <name>      create a new YAML config interactively
+  lmswitch serve <name>     run a model in the foreground (for systemd)
+  lmswitch migrate          migrate old .env configs to YAML
+  lmswitch -h, --help       show this help
+"""
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if not args:
+        show()
+        return
+    if args[0] in ("-h", "--help"):
+        print(_HELP)
+        return
+    if args[0] in ("list", "status", "ls"):
+        cmd_list()
+    elif args[0] in ("on", "start") and len(args) == 2:
+        cmd_on(args[1])
+    elif args[0] in ("off", "stop") and len(args) == 2:
+        cmd_off(args[1])
+    elif args[0] == "sync":
+        cmd_sync()
+    elif args[0] == "init":
+        cmd_init()
+    elif args[0] == "migrate":
+        cmd_migrate()
+    elif args[0] == "add" and len(args) == 2:
+        cmd_add(args[1])
+    elif args[0] == "serve" and len(args) == 2:
+        cmd_serve(args[1])
+    else:
+        sys.exit(_HELP)
+
+
+def show() -> None:
+    models = load_models()
+    if not TTY:
+        if not models:
+            print(f"No models found in {CONF_DIR}")
+            print("Run `lmswitch add <name>` to create a model config.")
+            return
+        render(models)
+        return
+    # Interactive: always enter the loop so the user sees the table/headers
+    # and can discover commands even when no models are configured yet.
+    while True:
+        if models:
+            render(models)
+        else:
+            print()
+            print(f"  No models found in {CONF_DIR}")
+            print("  Run `lmswitch add <name>` to create a model config.")
+        try:
+            choice = input("  Toggle # (space/comma separated, or q to quit): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice.lower() in ("q", "quit", "exit", ""):
+            return
+        if not models:
+            print("  (no models to toggle — use `lmswitch add <name>` first)\n")
+            continue
+        nums = [int(t) for t in re.split(r"[^0-9]+", choice) if t]
+        if not nums or any(not (1 <= n <= len(models)) for n in nums):
+            print(f"  ? enter 1-{len(models)} (one or more, e.g. 8 9 24) or q\n")
+            continue
+        for n in nums:
+            m = models[n - 1]
+            toggle(m["name"], "off" if _is_running(m["name"], m["runtime"]) else "on")
+        models = load_models()
+        print()
+
+
+def toggle(target: str, action: str) -> None:
+    name = _resolve(target)
+    yaml_path = CONF_DIR / f"{name}.yaml"
+    yaml = _load_yaml(yaml_path)
+    runtime = yaml.get("runtime", "llama")
+    verb = "start" if action == "on" else "stop"
+    print(f"{verb.capitalize()}ing {name} ({runtime}) on port "
+          f"{yaml.get('port', '?')} ...")
+    if action == "on":
+        start_model(name, yaml)
+    else:
+        if yaml.get("restart"):
+            unit = f"lmswitch@{name}.service"
+            subprocess.run(["systemctl", "--user", "stop", unit], check=False)
+            print(f"  ↓ {name} stopped (systemd)")
+        else:
+            stop_model(name, runtime)
+            print(f"  ↓ {name} stopped.")
 
 
 if __name__ == "__main__":
