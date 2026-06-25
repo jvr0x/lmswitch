@@ -576,6 +576,13 @@ def _start_llama_direct(name: str, yaml: dict) -> None:
     ]
     if mmproj:
         cmd += ["--mmproj", str(models_dir / mmproj)]
+    # Reason: llama.cpp's auto memory-fit step calls cudaMemGetInfo, which
+    # aborts on some CUDA builds (e.g. GB10/Blackwell). We already pass explicit
+    # --n-gpu-layers/--ctx-size, so default it off. Set `fit: none` in the yaml
+    # to omit the flag entirely on older llama.cpp builds that lack -fit.
+    fit = yaml.get("fit", "off")
+    if fit not in (None, "", "none", "skip"):
+        cmd += ["-fit", str(fit)]
 
     print(f"Starting llama-server {name} on port {port}...")
     print(f"  Model: {model_path}")

@@ -92,11 +92,19 @@ def test_diagnostics_not_suppressed():
     assert "--log-disable" not in cmd, "--log-disable hides startup errors; remove it"
 
 
+def test_fit_disabled_by_default():
+    """`-fit off` is passed by default to avoid the auto-fit cudaMemGetInfo abort."""
+    cmd = _capture_llama_cmd()
+    assert "-fit" in cmd, f"expected -fit flag (auto-fit aborts on some CUDA builds): {cmd}"
+    assert cmd[cmd.index("-fit") + 1] == "off"
+
+
 if __name__ == "__main__":
     failures = 0
     for fn in (test_no_equals_form_args,
                test_model_path_is_separate_arg,
-               test_diagnostics_not_suppressed):
+               test_diagnostics_not_suppressed,
+               test_fit_disabled_by_default):
         try:
             fn()
             print(f"PASS {fn.__name__}")
