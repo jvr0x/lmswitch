@@ -691,27 +691,40 @@ def _start_llama_direct(name: str, yaml: dict) -> None:
 
     cmd = [
         llama_bin,
-        f"--model={model_path}",
-        f"--alias={alias}",
-        f"--port={port}",
-        "--host=0.0.0.0",
-        f"--ctx-size={ctx}",
-        f"--n-gpu-layers={gpu_layers}",
-        f"--threads={threads}",
-        f"--batch-size={batch}",
-        f"--ubatch-size={ubatch}",
-        "--log-disable",
+        "--model", str(model_path),
+        "--alias", str(alias),
+        "--port", str(port),
+        "--host", "0.0.0.0",
+        "--ctx-size", str(ctx),
+        "--n-gpu-layers", str(gpu_layers),
+        "--threads", str(threads),
+        "--batch-size", str(batch),
+        "--ubatch-size", str(ubatch),
     ]
     if mmproj:
-        cmd += [f"--mmproj={models_dir / mmproj}"]
+        cmd += ["--mmproj", str(models_dir / mmproj)]
 
     print(f"Starting llama-server {name} on port {port}...")
     print(f"  Model: {model_path}")
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    log_path = RUN_DIR / f"{name}.log"
+    log_fh = open(log_path, "wb")
+    proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT,
                             start_new_session=True)
+    log_fh.close()
     pid_file = RUN_DIR / name
     pid_file.write_text(str(proc.pid))
-    print(f"  PID {proc.pid}")
+    time.sleep(2)
+    if proc.poll() is not None:
+        pid_file.unlink(missing_ok=True)
+        try:
+            tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-15:])
+        except Exception:
+            tail = "(could not read log)"
+        print(f"  ✗ {name} exited immediately (code {proc.returncode}). Last log lines:")
+        print(tail)
+        print(f"  Full log: {log_path}")
+        return
+    print(f"  PID {proc.pid}  (log: {log_path})")
 
 
 def stop_model(name: str, runtime: str) -> None:
