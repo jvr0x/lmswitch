@@ -53,6 +53,9 @@ def _capture_llama_cmd() -> list:
         return _FakeProc()
 
     mod.subprocess.Popen = _fake_popen
+    # The readiness probe shells out to curl via subprocess.run; stub it to
+    # report "ready" immediately so the test neither hits the network nor waits.
+    mod.subprocess.run = lambda *a, **k: type("R", (), {"returncode": 0})()
     mod.RUN_DIR = Path(tempfile.mkdtemp())
     # Keep tests fast: the fix adds a real `time.sleep(2)` instant-exit probe.
     mod.time.sleep = lambda *a, **k: None
