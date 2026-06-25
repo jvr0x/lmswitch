@@ -11,6 +11,9 @@ display_name: "Qwen3-4B"                             # label shown in the table 
 # threads: 12                                        # CPU threads
 # batch: 1024                                        # --batch-size
 # ubatch: 512                                        # --ubatch-size
+# fit: off                                           # auto memory-fit; "off" (default) skips the step
+#                                                    #   that aborts on some CUDA builds (e.g. GB10);
+#                                                    #   use "none" to omit -fit on older llama.cpp builds
 # alias: qwen3-4b                                    # --alias (defaults to the model id)
 # mmproj: "path/to/mmproj.gguf"                      # multimodal projector, relative to MODELS_DIR
 # llama_bin: "/path/to/llama-server"                 # defaults to ../llama.cpp/build/bin/llama-server
