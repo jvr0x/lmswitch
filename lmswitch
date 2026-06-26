@@ -423,6 +423,23 @@ def render(models: list[dict]) -> None:
 # Process management
 # ---------------------------------------------------------------------------
 
+def _extra_args(yaml: dict) -> list[str]:
+    """Raw flags appended verbatim to the server command line.
+
+    Lets ANY llama-server / vllm flag be set from the config, beyond the
+    first-class keys above. Accepts either a YAML list (one argv token per
+    item) or a single string (split with shell-style quoting), e.g.:
+
+        extra_args: ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+        extra_args: "--temp 0.7 --top-p 0.9 --jinja"
+    """
+    raw = yaml.get("extra_args") or []
+    if isinstance(raw, str):
+        import shlex
+        return shlex.split(raw)
+    return [str(x) for x in raw]
+
+
 def _vllm_args(yaml: dict) -> list[str]:
     args: list[str] = []
     if yaml.get("enforce_eager", True):
@@ -447,8 +464,7 @@ def _vllm_args(yaml: dict) -> list[str]:
         args.append(f"--max-num-seqs={yaml['max_num_seqs']}")
     if yaml.get("load_format"):
         args.append(f"--load-format={yaml['load_format']}")
-    for extra in yaml.get("extra_args", []) or []:
-        args.append(str(extra))
+    args += _extra_args(yaml)
     return args
 
 
@@ -648,6 +664,9 @@ def _start_llama_direct(name: str, yaml: dict) -> None:
     fit = yaml.get("fit", "off")
     if fit not in (None, "", "none", "skip"):
         cmd += ["-fit", str(fit)]
+    # Any other llama-server flag (e.g. -fa on, -ctk q8_0, --temp 0.7) goes
+    # through extra_args, appended last so it can override the defaults above.
+    cmd += _extra_args(yaml)
 
     print(f"Starting llama-server {name} on port {port}...")
     print(f"  Model: {model_path}")

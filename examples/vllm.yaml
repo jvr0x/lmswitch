@@ -22,8 +22,23 @@ gpu_memory_utilization: 0.55                   # --gpu-memory-utilization
 # attention_backend: "FLASHINFER"              # --attention-backend
 # max_num_seqs: 32                             # --max-num-seqs
 # load_format: "auto"                          # --load-format
-# enforce_eager: true                          # --enforce-eager (default: true)
-# extra_args:                                  # extra raw vLLM args, appended verbatim
-#   - "--some-flag"
-#   - "value"
+# enforce_eager: true                          # --enforce-eager (default: true).
+#                                              #   Emitted by DEFAULT — set `false` to
+#                                              #   allow CUDA graphs.
+#
+# extra_args — pass ANY other `vllm serve` flag verbatim (appended last). Same
+# helper as the llama runtime, so a list OR a shell-split string both work.
+# See: vllm serve --help.
+# extra_args: ["--kv-cache-dtype", "fp8", "--quantization", "modelopt"]
+# extra_args: "--enable-prefix-caching --swap-space 4"
+#
+# CAVEATS (vLLM only):
+#  - These flags are ALREADY hardcoded into the docker command: --port, --host,
+#    --max-model-len, --tensor-parallel-size, --max-num-seqs, --served-model-name,
+#    --gpu-memory-utilization. Don't repeat them in extra_args (vLLM would see
+#    the flag twice) — use the first-class keys above (port:, ctx:,
+#    gpu_memory_utilization:, max_num_seqs:, ...) instead.
+#  - extra_args run inside the container, so any file path must be one that's
+#    mounted into it (the model dir and ~/.cache/huggingface are).
+#
 # restart: on-failure                          # opt into systemd-managed auto-restart

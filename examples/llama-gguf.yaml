@@ -20,3 +20,8 @@ display_name: "Qwen3-4B"                             # label shown in the table 
 # mmproj: "path/to/mmproj.gguf"                      # multimodal projector, relative to MODELS_DIR
 # llama_bin: "/path/to/llama-server"                 # defaults to ../llama.cpp/build/bin/llama-server
 # restart: on-failure                                # opt into systemd-managed auto-restart
+#
+# extra_args — pass ANY other llama-server flag verbatim (appended last, so it
+# can override the defaults above). See: llama-server --help. List or string:
+# extra_args: ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+# extra_args: "--temp 0.7 --top-p 0.9 --jinja"
