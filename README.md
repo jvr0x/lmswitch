@@ -1,4 +1,15 @@
+```
+██╗     ███╗   ███╗███████╗██╗    ██╗██╗████████╗ ██████╗██╗  ██╗
+██║     ████╗ ████║██╔════╝██║    ██║██║╚══██╔══╝██╔════╝██║  ██║
+██║     ██╔████╔██║███████╗██║ █╗ ██║██║   ██║   ██║     ███████║
+██║     ██║╚██╔╝██║╚════██║██║███╗██║██║   ██║   ██║     ██╔══██║
+███████╗██║ ╚═╝ ██║███████║╚███╔███╔╝██║   ██║   ╚██████╗██║  ██║
+╚══════╝╚═╝     ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝
+```
+
 # lmswitch
+
+> local LLM switcher · GGUF + vLLM
 
 List and toggle local LLMs from per-model YAML configs.
 
@@ -9,6 +20,24 @@ start/stop them interactively. **GGUF** models run under
 background process); **vLLM** models run in Docker. It waits for each model to
 actually become ready, refuses loads that would exceed free RAM, and regenerates
 the [opencode](https://opencode.ai) provider list from whatever is serving.
+
+Running `lmswitch` (the same wordmark above greets you):
+
+```
+  RAM    │ 122Gi total   33Gi used   89Gi available
+  Models │ ~20.8G weights   1 / 3 loaded
+  Disk   │ 113.1G   3 / 3 downloaded
+  ● loaded   ○ stopped      ✓ downloaded   ✗ missing
+
+   #  S  TYPE   NAME            SIZE  DL   PORT  DISPLAY
+   Qwen ──────────────────────────────────────────────────────────────────────
+   1  ○   gguf   qwen3-4b        2.3G  ✓   8085  Qwen3-4B
+   2  ●   gguf   qwen3.6-35b    20.8G  ✓   8089  Qwen3.6-35B-A3B
+   Nex ───────────────────────────────────────────────────────────────────────
+   3  ○   gguf   nex-n2-pro     90.0G  ✓   8104  Nex-N2-Pro 397B-A17B (IQ1_M)
+
+  Toggle # (space/comma separated, enter or q to quit):
+```
 
 ## Features
 
