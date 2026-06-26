@@ -1,64 +1,33 @@
-"""Reproduces the llama-server launch bug.
+"""Tests for llama-server command construction.
 
-lmswitch built every llama-server flag in `--flag=value` form. This llama.cpp
-build rejects that syntax ("error: invalid argument: --model=..."), so the
-process exits 1 before binding its port. The failure was invisible because the
-child's stdout/stderr went to DEVNULL *and* `--log-disable` muted llama-server's
-own logs.
-
-These tests stub out subprocess.Popen to capture the argv that lmswitch would
-exec, without launching anything, so they run anywhere (no GPU / no spark).
-
-The fix must:
-  * emit space-separated args (`--model PATH`, not `--model=PATH`)
-  * stop passing `--log-disable`
+These tests import from the lmswitch package and stub subprocess.Popen
+to capture the argv without launching anything.
 """
 
-import importlib.util
 import re
 import tempfile
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from unittest import mock
 
-_LMS = Path(__file__).resolve().parent.parent / "lmswitch"
-
-
-def _load():
-    """Loads the extension-less `lmswitch` script as a module."""
-    loader = SourceFileLoader("lmswitch_mod", str(_LMS))
-    spec = importlib.util.spec_from_loader("lmswitch_mod", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+import lmswitch.runtimes.llama as llama_mod
 
 
 def _capture_llama_cmd() -> list:
     """Invokes the llama start path with Popen stubbed; returns the argv list."""
-    mod = _load()
     captured: dict = {}
 
     class _FakeProc:
         pid = 999999
 
         def poll(self):
-            # Report "still alive" so any instant-exit detection in the fix
-            # treats the launch as successful.
             return None
 
         def wait(self, *a, **k):
             return 0
 
     def _fake_popen(cmd, *a, **k):
-        captured["cmd"] = cmd
+        captured["cmd"] = list(cmd)
         return _FakeProc()
-
-    mod.subprocess.Popen = _fake_popen
-    # The readiness probe shells out to curl via subprocess.run; stub it to
-    # report "ready" immediately so the test neither hits the network nor waits.
-    mod.subprocess.run = lambda *a, **k: type("R", (), {"returncode": 0})()
-    mod.RUN_DIR = Path(tempfile.mkdtemp())
-    # Keep tests fast: the fix adds a real `time.sleep(2)` instant-exit probe.
-    mod.time.sleep = lambda *a, **k: None
 
     yaml = {
         "runtime": "llama",
@@ -66,8 +35,13 @@ def _capture_llama_cmd() -> list:
         "port": 8085,
         "ctx": 65536,
         "display_name": "Qwen3-4B",
+        "_models_dir": Path(tempfile.mkdtemp()),
     }
-    mod._start_llama_direct("qwen3-4b", yaml)
+
+    with mock.patch.object(llama_mod.subprocess, "Popen", _fake_popen), \
+         mock.patch.object(llama_mod.subprocess, "run", return_value=type("R", (), {"returncode": 0})()), \
+         mock.patch.object(llama_mod.time, "sleep"):
+        llama_mod._start_llama_direct("qwen3-4b", yaml)
     return captured["cmd"]
 
 
@@ -95,7 +69,7 @@ def test_diagnostics_not_suppressed():
 def test_fit_disabled_by_default():
     """`-fit off` is passed by default to avoid the auto-fit cudaMemGetInfo abort."""
     cmd = _capture_llama_cmd()
-    assert "-fit" in cmd, f"expected -fit flag (auto-fit aborts on some CUDA builds): {cmd}"
+    assert "-fit" in cmd, f"expected -fit flag: {cmd}"
     assert cmd[cmd.index("-fit") + 1] == "off"
 
 

@@ -1,0 +1,2 @@
+[console_scripts]
+lmswitch = lmswitch.cli:main
