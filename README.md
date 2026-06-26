@@ -23,8 +23,10 @@ size, download state, port, and whether it's currently serving — and lets you
 start/stop them interactively. **GGUF** models run under
 [`llama.cpp`](https://github.com/ggml-org/llama.cpp) (`llama-server` as a
 background process); **vLLM** models run in Docker. It waits for each model to
-actually become ready, refuses loads that would exceed free RAM, and regenerates
-the [opencode](https://opencode.ai) provider list from whatever is serving.
+actually become ready, refuses loads that would exceed free RAM, and keeps your
+coding agents' configs in sync — [opencode](https://opencode.ai),
+[hermes](https://github.com/NousResearch/hermes-agent), and
+[grok](https://github.com/xai-org/grok-cli) — with whatever is serving.
 
 Running `lmswitch` (the same wordmark above greets you):
 
@@ -52,12 +54,15 @@ Running `lmswitch` (the same wordmark above greets you):
   Docker. Pick per model with `runtime:`.
 - **Readiness-aware** — after launch it polls the model's `/v1/models` endpoint
   and only reports `Ready` once it's actually serving (with a `…loading` progress
-  heartbeat and crash detection), so opencode is synced to reality, not guesses.
+  heartbeat and crash detection), so the synced configs reflect reality, not guesses.
 - **Pre-load RAM guard** — refuses a start that would blow past available memory
   (overridable per-model with `force: true`), so a too-big model can't OOM-lock
   the machine.
-- **opencode integration** — `~/.config/opencode/opencode.json` is regenerated
-  from the currently-serving models on every toggle / `on` / `off` / `sync`.
+- **Config sync** — on every toggle / `on` / `off` / `sync`, the
+  currently-serving models are written into your coding agents' configs:
+  **opencode** (`opencode.json`), **hermes** (`config.yaml`), and **grok**
+  (`config.toml`). Pick which targets are active during `lmswitch init`. See
+  [Config sync](#config-sync).
 - **Optional systemd auto-restart** per model via `restart: on-failure`.
 
 ## Requirements
@@ -71,7 +76,7 @@ systemd user units).
 | GGUF models | A built `llama.cpp` with `llama-server` (a CUDA build for GPU offload). Default binary path: `<lmswitch>/../llama.cpp/build/bin/llama-server` — override per-model with `llama_bin:`. |
 | vLLM models | Docker + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) (`--gpus all`). Pulls the `vllm/vllm-openai` image. |
 | `restart: on-failure` | A running systemd **user** instance (`systemctl --user`). |
-| opencode sync | [opencode](https://opencode.ai) (optional). |
+| config sync | Any of [opencode](https://opencode.ai), [hermes](https://github.com/NousResearch/hermes-agent), [grok](https://github.com/xai-org/grok-cli) (all optional — only configs that exist are synced). |
 
 ## Install
 
@@ -81,8 +86,9 @@ systemd user units).
 ```
 
 `init` asks where your models live (writes `ai-models/.lmswitch`), creates the
-`ai-models/` config dir, and symlinks `~/.local/bin/lmswitch` → the script.
-Ensure `~/.local/bin` is on your `$PATH`. (Manual alternative:
+`ai-models/` config dir, symlinks `~/.local/bin/lmswitch` → the script, and asks
+which sync targets to enable (opencode / hermes / grok — only the ones whose
+configs it finds). Ensure `~/.local/bin` is on your `$PATH`. (Manual alternative:
 `ln -sf "$PWD/lmswitch" ~/.local/bin/lmswitch`.)
 
 ## Getting started
@@ -93,7 +99,8 @@ Ensure `~/.local/bin` is on your `$PATH`. (Manual alternative:
 4. Create a config — `lmswitch add <name>`, or copy a template from
    [`examples/`](examples/) into `ai-models/<name>.yaml`.
 5. `lmswitch` → type the model's number to start it. It loads, waits until the
-   endpoint answers, prints `Ready on port <port>`, and syncs opencode.
+   endpoint answers, prints `Ready on port <port>`, and syncs your enabled
+   configs (opencode / hermes / grok).
 6. Hit it: `curl localhost:<port>/v1/models`.
 
 ## Usage
@@ -103,7 +110,7 @@ lmswitch                  # interactive: show the table, then type model #s to t
 lmswitch list             # just print the table (read-only)
 lmswitch on  <name|#>     # start a model
 lmswitch off <name|#>     # stop a model
-lmswitch sync             # regenerate opencode.json from currently-serving models
+lmswitch sync             # regenerate enabled configs from currently-serving models
 lmswitch add  <name>      # create a model config interactively
 lmswitch serve <name>     # run a model in the foreground (used by systemd)
 lmswitch init             # bootstrap ai-models/, .lmswitch, and the symlink
@@ -130,7 +137,7 @@ your models directory**. Fully-commented templates live in
 | `model` | — | path to the `.gguf` file (llama) or model dir (vLLM), relative to the models dir |
 | `port` | `8081` | OpenAI-compatible server port |
 | `ctx` | `65536` | context length |
-| `display_name` | `<name>` | label in the table / opencode |
+| `display_name` | `<name>` | label in the table / synced configs |
 | `ready_timeout` | `600` (vLLM) / `300` (llama) | seconds to wait for readiness |
 | `force` | `false` | bypass the pre-load RAM guard |
 | `restart` | — | `on-failure` → run under a systemd user unit |
@@ -183,35 +190,88 @@ first shard.
 - **RAM guard** → before launching, free RAM (`MemAvailable` from `/proc/meminfo`)
   is compared to an estimate: `gpu_memory_utilization × total` for vLLM, on-disk
   weight size × 1.3 for GGUF. If short, the start is refused unless `force: true`.
-- **opencode** → `~/.config/opencode/opencode.json` gets one provider per serving
-  model, pointing at `http://<SPARK_HOST>:<port>/v1`. `SPARK_HOST` is a constant
-  near the top of the script (`spark-8912.local`) — change it if your host
-  differs.
+- **Config sync** → each enabled target gets the currently-serving models, all
+  pointing at `http://<SPARK_HOST>:<port>/v1`: **opencode** one provider per
+  model, **hermes** the active model + a `custom_providers` entry per model (so
+  they show in `/model`), **grok** one `[model.<id>]` table per model.
+  `SPARK_HOST` is a constant near the top of the script (`spark-8912.local`) —
+  change it if your host differs. See [Config sync](#config-sync).
 
-## opencode integration
+## Config sync
 
-lmswitch keeps your [opencode](https://opencode.ai) config honest. On every
-`on` / `off` / toggle / `sync`, `~/.config/opencode/opencode.json` is regenerated
-to hold exactly one provider per **currently-serving** model, each pointing at
-`http://<SPARK_HOST>:<port>/v1`. Your coding agent always sees the models that
-are actually up — on the right ports, under the right names — with no hand-editing
-and no calls to a model that isn't loaded.
+lmswitch keeps your coding agents' configs honest: on every `on` / `off` /
+toggle / `sync` it rewrites the **currently-serving** models into each enabled
+target, every endpoint pointing at `http://<SPARK_HOST>:<port>/v1`. Your agent
+always sees the models that are actually up — right ports, right names — with no
+hand-editing and no calls to a model that isn't loaded. `SPARK_HOST` is a
+constant near the top of the script (`spark-8912.local`); set it to your serving
+host.
 
-If `~/.local/share/opencode-export/` exists, a copy is written there too, so a
-remote client (e.g. a laptop/Mac over Tailscale, LAN, or a Samba mount) can pick
-up the same config and point straight at the serving host. Run `lmswitch sync`
-to regenerate on demand — handy after a detached load finishes. `SPARK_HOST` is a
-constant near the top of the script; set it to your serving host.
+Targets are chosen during `lmswitch init` and stored as `SYNC_OPENCODE` /
+`SYNC_HERMES` / `SYNC_GROK` in `ai-models/.lmswitch` (only configs that exist on
+disk are touched; a target with no config is skipped). Each shapes its own file:
 
-## Tests
+- **[opencode](https://opencode.ai)** → `~/.config/opencode/opencode.json` gets
+  one provider per serving model. If `~/.local/share/opencode-export/` exists, a
+  copy is written there too, so a remote client (a laptop/Mac over Tailscale,
+  LAN, or a Samba mount) can pick up the same config and point straight at the
+  serving host.
+- **[hermes](https://github.com/NousResearch/hermes-agent)** →
+  `~/.hermes/config.yaml`. Hermes runs one active model, so the `model:` block is
+  set to the serving model and kept **sticky** (only switched when the current
+  one stops); a vision model (id containing `vl`) is wired into
+  `auxiliary.vision`. Every serving model is also registered under
+  `custom_providers:` (with `discover_models: false`, so the picker doesn't
+  live-probe and hang) — that's what makes them all selectable from hermes'
+  `/model`. Custom providers you added by hand (pointing at other hosts) are
+  preserved. Because discovery is off, `/model` reflects the last sync — re-run
+  `lmswitch sync` (or just toggle) after starting a model to refresh the list.
+- **[grok](https://github.com/xai-org/grok-cli)** → `~/.grok/config.toml` gets
+  one `[model.<id>]` table per serving model; all your other grok settings
+  (`[cli]`, `[ui]`, marketplace, the `[models] default`, …) are left untouched.
+
+Run `lmswitch sync` to regenerate on demand — handy after a detached load
+finishes.
+
+## Development & tests
+
+The tests need `pytest` and `pyyaml`. The easiest setup is a
+[uv](https://docs.astral.sh/uv/) virtualenv (the checked-in `.venv` is **not**
+portable — if it was copied from another machine/OS, delete and recreate it):
 
 ```bash
-python3 tests/test_llama_cmd.py        # llama command construction
-python3 tests/test_vllm_and_abort.py   # vLLM start, readiness, RAM guard, Ctrl-C, opencode sync
+cd ~/utils/lmswitch
+rm -rf .venv                       # only if a stale/foreign .venv is present
+uv venv                            # create .venv from pyproject (Python >=3.10)
+uv pip install pytest pyyaml       # test deps (pyyaml is also a runtime dep)
 ```
 
-Both are pure unit tests — `subprocess` / Docker / `curl` are stubbed, so they
-run anywhere (no GPU, no models, no Docker required).
+Run the whole suite (prefix with `uv run` so it uses the venv):
+
+```bash
+uv run pytest tests/ -q
+```
+
+Or run a single file / test:
+
+```bash
+uv run pytest tests/test_sync.py -q
+uv run pytest tests/test_sync.py::test_regen_hermes_keeps_running_default_sticky -q
+```
+
+| File | Covers |
+|------|--------|
+| `tests/test_llama_cmd.py` | llama-server command construction |
+| `tests/test_vllm_and_abort.py` | vLLM start, readiness, RAM guard, Ctrl-C, opencode sync |
+| `tests/test_sync.py` | config sync to opencode / hermes / grok (selection, idempotency, round-trip) |
+
+All tests are pure unit tests — `subprocess` / Docker / `curl` / ports are
+stubbed and configs are written to temp dirs, so they run anywhere (no GPU, no
+models, no Docker, and they never touch your real configs).
+
+> Without `uv` you can install the deps into any Python 3.10+ environment
+> (`pip install pytest pyyaml`) and run `pytest tests/`. The two older files also
+> run standalone (`python3 tests/test_llama_cmd.py`); `test_sync.py` needs pytest.
 
 ## License
 
