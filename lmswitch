@@ -191,6 +191,7 @@ FAMILY_RULES = [
     ("GLM", ("glm",)),
     ("Nex", ("nex",)),
     ("Step", ("step",)),
+    ("Ornith", ("ornith",)),
 ]
 
 
@@ -344,6 +345,20 @@ def _ram_line() -> tuple[float, float, float] | None:
 # Rendering
 # ---------------------------------------------------------------------------
 
+def _banner() -> str:
+    """Returns the lmswitch wordmark (ANSI Shadow block art) for the TUI header."""
+    art = "\n".join((
+        "██╗     ███╗   ███╗███████╗██╗    ██╗██╗████████╗ ██████╗██╗  ██╗",
+        "██║     ████╗ ████║██╔════╝██║    ██║██║╚══██╔══╝██╔════╝██║  ██║",
+        "██║     ██╔████╔██║███████╗██║ █╗ ██║██║   ██║   ██║     ███████║",
+        "██║     ██║╚██╔╝██║╚════██║██║███╗██║██║   ██║   ██║     ██╔══██║",
+        "███████╗██║ ╚═╝ ██║███████║╚███╔███╔╝██║   ██║   ╚██████╗██║  ██║",
+        "╚══════╝╚═╝     ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝   ╚═╝    ╚═════╝╚═╝  ╚═╝",
+    ))
+    tagline = "  local LLM switcher · GGUF + vLLM"
+    return "\n" + _c(art, "36") + "\n" + _c(tagline, "2") + "\n"
+
+
 def render(models: list[dict]) -> None:
     name_w = max(max((len(m["name"]) for m in models), default=4), 4)
     loaded = [m for m in models if _is_running(m["name"], m["runtime"])]
@@ -355,23 +370,30 @@ def render(models: list[dict]) -> None:
     ram = _ram_line()
     if ram:
         total, used, avail = ram
-        print(f"  RAM:    {total:.0f}Gi total  |  "
-              + _c(f"{used:.0f}Gi used", "33") + "  |  "
-              + _c(f"{avail:.0f}Gi available", "32"))
-        print("  Models: " + _c(f"~{_human(total_loaded)} resident", "1")
-              + f" across {len(loaded)} loaded  (of {len(models)} total)")
-        print("  Disk:   " + _c(_human(total_disk), "1")
-              + f" across {len(downloaded)} downloaded  (of {len(models)} total)")
+        rows = [
+            ("RAM", f"{total:.0f}Gi total   "
+                    + _c(f"{used:.0f}Gi used", "33") + "   "
+                    + _c(f"{avail:.0f}Gi available", "32")),
+            ("Models", _c(f"~{_human(total_loaded)} weights", "1")
+                       + f"   {len(loaded)} / {len(models)} loaded"),
+            ("Disk", _c(_human(total_disk), "1")
+                     + f"   {len(downloaded)} / {len(models)} downloaded"),
+        ]
+        lbl_w = max(len(lbl) for lbl, _ in rows)
+        for lbl, val in rows:
+            print(f"  {lbl:<{lbl_w}} {_c('│', '2')} {val}")
     print("  " + _c("● loaded", "32") + "   " + _c("○ stopped", "2")
           + "      " + _c("✓ downloaded", "32") + "   "
           + _c("✗ missing", "31"))
-    print("  " + _c("R=restart", "36") + "   (systemd-managed)")
+    if any(m.get("restart") for m in models):
+        print("  " + _c("R", "36") + " = auto-restart on failure (systemd)")
     print()
     header = (f"  {'#':>2}  S  {'TYPE':<5}  {'NAME':<{name_w}}  "
               f"{'SIZE':>7}  DL  {'PORT':>5}  DISPLAY")
     print(_c(header, "1"))
 
-    rule_w = name_w + 30
+    disp_w = max((len(m["display"]) for m in models), default=7)
+    rule_w = name_w + disp_w + 37
     cur_family = None
     for i, m in enumerate(models, 1):
         running = _is_running(m["name"], m["runtime"])
@@ -1031,6 +1053,7 @@ def show() -> None:
             return
         render(models)
         return
+    print(_banner())
     # Interactive: always enter the loop so the user sees the table/headers
     # and can discover commands even when no models are configured yet.
     while True:
@@ -1041,7 +1064,7 @@ def show() -> None:
             print(f"  No models found in {CONF_DIR}")
             print("  Run `lmswitch add <name>` to create a model config.")
         try:
-            choice = input("  Toggle # (space/comma separated, or q to quit): ").strip()
+            choice = input("  Toggle # (space/comma separated, enter or q to quit): ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
