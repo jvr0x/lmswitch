@@ -128,4 +128,6 @@ must be mounted in (the model dir and `~/.cache/huggingface` are).
 7. Start: `lmswitch on <id>` → wait for "Ready on port N". On failure, read the
    log path it prints (GGUF: `ai-models/running/<id>.log`; vLLM: `docker logs vllm-<id>`).
 
-See `examples/llama-gguf.yaml` and `examples/vllm.yaml` for fully-commented templates.
+See the fully-commented templates: `examples/llama-gguf.yaml` (text GGUF),
+`examples/llama-gguf-vision.yaml` (vision GGUF with `mmproj`), and
+`examples/vllm.yaml`.

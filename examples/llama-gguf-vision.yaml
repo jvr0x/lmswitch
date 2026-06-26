@@ -1,0 +1,37 @@
+# Example lmswitch config for a VISION (multimodal) GGUF served by llama-server.
+# Copy into ai-models/<name>.yaml — the filename (minus .yaml) is the model id.
+#
+# A vision GGUF is TWO files: the language model + an `mmproj` projector that
+# encodes images into embeddings the LLM consumes. Both live in the same repo
+# and both must be downloaded. The only structural difference from a text GGUF
+# is the `mmproj:` key.
+runtime: llama
+model: "unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF/Qwen3-VL-30B-A3B-Instruct-UD-Q4_K_XL.gguf"
+port: 8102                                           # OpenAI-compatible server port (unique!)
+ctx: 65536                                           # --ctx-size
+display_name: "Qwen3-VL-30B-A3B Instruct"            # table / opencode label
+
+# REQUIRED for vision. Path (relative to MODELS_DIR) to the multimodal projector.
+# Repos ship it as mmproj-F16.gguf / mmproj-F32.gguf / mmproj-BF16.gguf — pick one
+# (F16 is the usual default). Without this key the server still starts but is
+# TEXT-ONLY and rejects image inputs.
+mmproj: "unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF/mmproj-F16.gguf"
+
+# Same GB10 optimization as text models: flash-attn + q8_0 KV cache. This only
+# touches the LLM's text KV cache, not the image encoder, so it's safe here.
+extra_args: ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]
+
+# --- notes ---
+# - mmproj precision is independent of the model quant: a Q4 model happily uses an
+#   F16 mmproj. Don't try to "match" them.
+# - The projector must come from the SAME model/family — a Qwen3-VL mmproj will
+#   not work with a Gemma model.
+# - All other optional keys from examples/llama-gguf.yaml apply unchanged
+#   (gpu_layers, threads, batch, ready_timeout, restart, ...).
+#
+# Verify it actually does vision (a text ping won't exercise the projector):
+#   curl -s http://127.0.0.1:8102/v1/chat/completions -H 'Content-Type: application/json' -d '{
+#     "messages":[{"role":"user","content":[
+#       {"type":"text","text":"What is in this image?"},
+#       {"type":"image_url","image_url":{"url":"data:image/png;base64,<BASE64>"}}
+#     ]}],"max_tokens":100}'
