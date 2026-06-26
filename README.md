@@ -13,6 +13,11 @@
 
 List and toggle local LLMs from per-model YAML configs.
 
+> **Adding a model?** See [`SKILL.md`](SKILL.md) — a self-contained guide (for
+> humans or AI agents) to authoring `ai-models/*.yaml` recipes: every key, the
+> `extra_args` passthrough, and the GB10 gotchas. Point an agent at this folder
+> and it can add a model from that doc alone.
+
 `lmswitch` shows a table of every configured model (grouped by family) with its
 size, download state, port, and whether it's currently serving — and lets you
 start/stop them interactively. **GGUF** models run under
