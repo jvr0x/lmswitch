@@ -188,6 +188,21 @@ first shard.
   near the top of the script (`spark-8912.local`) — change it if your host
   differs.
 
+## opencode integration
+
+lmswitch keeps your [opencode](https://opencode.ai) config honest. On every
+`on` / `off` / toggle / `sync`, `~/.config/opencode/opencode.json` is regenerated
+to hold exactly one provider per **currently-serving** model, each pointing at
+`http://<SPARK_HOST>:<port>/v1`. Your coding agent always sees the models that
+are actually up — on the right ports, under the right names — with no hand-editing
+and no calls to a model that isn't loaded.
+
+If `~/.local/share/opencode-export/` exists, a copy is written there too, so a
+remote client (e.g. a laptop/Mac over Tailscale, LAN, or a Samba mount) can pick
+up the same config and point straight at the serving host. Run `lmswitch sync`
+to regenerate on demand — handy after a detached load finishes. `SPARK_HOST` is a
+constant near the top of the script; set it to your serving host.
+
 ## Tests
 
 ```bash
