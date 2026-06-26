@@ -115,13 +115,63 @@ def test_wait_ready_dead_when_backend_exits():
     assert mod._wait_ready("m", 8085, 10, lambda: False) == "dead"
 
 
+def _guarded_start(mod, ram, yaml):
+    """Runs start_model with _ram_line/launchers stubbed; returns whether it launched."""
+    started = {"on": False}
+    mod._ram_line = lambda: ram
+    mod._start_vllm_direct = lambda n, y: started.__setitem__("on", True)
+    mod._start_llama_direct = lambda n, y: started.__setitem__("on", True)
+    mod._start_systemd = lambda n, y, r: started.__setitem__("on", True)
+    mod.start_model("m", yaml)
+    return started["on"]
+
+
+def test_memory_guard_refuses_insufficient_vllm():
+    """A vLLM reservation larger than free RAM must be refused."""
+    mod = _load()
+    # 5Gi free; 0.55 * 121 ≈ 67Gi needed → refuse.
+    started = _guarded_start(mod, (121.0, 116.0, 5.0),
+                             {"runtime": "vllm", "gpu_memory_utilization": 0.55})
+    assert started is False, "must refuse when the vLLM reservation exceeds free RAM"
+
+
+def test_memory_guard_allows_when_enough():
+    """A model that fits in free RAM must start."""
+    mod = _load()
+    started = _guarded_start(mod, (121.0, 20.0, 95.0),
+                             {"runtime": "vllm", "gpu_memory_utilization": 0.55})
+    assert started is True, "must start when free RAM covers the reservation"
+
+
+def test_memory_guard_force_overrides():
+    """`force: true` bypasses the guard."""
+    mod = _load()
+    started = _guarded_start(mod, (121.0, 116.0, 5.0),
+                             {"runtime": "vllm", "gpu_memory_utilization": 0.55, "force": True})
+    assert started is True, "force:true must override the RAM guard"
+
+
+def test_memory_guard_llama_uses_model_size():
+    """GGUF footprint is estimated from the on-disk weight size."""
+    mod = _load()
+    mod._model_size_and_present = lambda rel, rt: (30 * 1024 ** 3, True)  # 30Gi weights
+    # 30Gi * 1.3 ≈ 39Gi needed, only 10Gi free → refuse.
+    started = _guarded_start(mod, (121.0, 111.0, 10.0),
+                             {"runtime": "llama", "model": "big.gguf"})
+    assert started is False, "must refuse a GGUF whose weights+headroom exceed free RAM"
+
+
 if __name__ == "__main__":
     failures = 0
     for fn in (test_stale_container_cleared_before_run,
                test_graceful_keyboardinterrupt,
                test_toggle_syncs_opencode,
                test_wait_ready_ready_on_success,
-               test_wait_ready_dead_when_backend_exits):
+               test_wait_ready_dead_when_backend_exits,
+               test_memory_guard_refuses_insufficient_vllm,
+               test_memory_guard_allows_when_enough,
+               test_memory_guard_force_overrides,
+               test_memory_guard_llama_uses_model_size):
         try:
             fn()
             print(f"PASS {fn.__name__}")

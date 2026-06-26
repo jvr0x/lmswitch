@@ -7,6 +7,8 @@ ctx: 65536                                           # context length (--ctx-siz
 display_name: "Qwen3-4B"                             # label shown in the table and in opencode
 
 # --- optional (defaults shown) ---
+# ready_timeout: 300                                 # seconds to wait for readiness (llama default 300)
+# force: false                                       # set true to bypass the pre-load RAM guard
 # gpu_layers: 99                                     # --n-gpu-layers (99 = offload all layers)
 # threads: 12                                        # CPU threads
 # batch: 1024                                        # --batch-size
