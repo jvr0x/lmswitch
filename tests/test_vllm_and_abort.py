@@ -36,7 +36,7 @@ def test_stale_container_cleared_before_run():
 
     with mock.patch.object(vllm_mod.subprocess, "run", fake_run), \
          mock.patch.object(vllm_mod.time, "sleep"), \
-         mock.patch.object(vllm_mod, "_docker_container", return_value=None):
+         mock.patch.object(checks_mod, "_docker_container", return_value=None):
         vllm_mod._start_vllm_direct("qwen3.6-35b-nvfp4-nvidia", yaml)
 
     run_idx = next((i for i, c in enumerate(calls) if c[:2] == ["docker", "run"]), None)
@@ -101,16 +101,12 @@ def test_wait_ready_dead_when_backend_exits():
 def _guarded_start(ram, yaml):
     """Runs start_model with _ram_line/launchers stubbed."""
     started = {"on": False}
-    def _capture_vllm(*a, **k):
-        started["on"] = True
-    def _capture_llama(*a, **k):
-        started["on"] = True
-    def _capture_systemd(*a, **k):
+    def _capture(*a, **k):
         started["on"] = True
     with mock.patch("lmswitch.system.memory._ram_line", return_value=ram), \
-         mock.patch("lmswitch.runtimes._start_vllm_direct", _capture_vllm), \
-         mock.patch("lmswitch.runtimes._start_llama_direct", _capture_llama), \
-         mock.patch("lmswitch.runtimes._start_systemd", _capture_systemd):
+         mock.patch("lmswitch.runtimes.vllm.VLLMRuntime.start", _capture), \
+         mock.patch("lmswitch.runtimes.llama.LlamaRuntime.start", _capture), \
+         mock.patch("lmswitch.runtimes.systemd._start_systemd", _capture):
         runtime_mod.start_model("m", yaml)
     return started["on"]
 

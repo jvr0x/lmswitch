@@ -17,4 +17,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["lmswitch", "lmswitch.models", "lmswitch.runtimes", "lmswitch.system"]
 
+[tool.pytest.ini_options]
+pythonpath = ["tests"]
+
 

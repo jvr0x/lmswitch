@@ -1,4 +1,16 @@
-"""Runtime abstraction for model servers."""
+"""Runtime abstraction for model servers.
+
+Each runtime implements a common interface via ``BaseRuntime``:
+  - ``start(name, yaml) -> RunningState``
+  - ``stop(name, yaml) -> None``
+  - ``is_running(name, runtime_name) -> bool``
+  - ``is_ready(name, port, timeout) -> str``
+
+Adding a new runtime means writing one file that subclasses
+``BaseRuntime`` and registering it in ``runtime_registry``.
+"""
+
+from __future__ import annotations
 
 import os
 import shlex
@@ -14,19 +26,19 @@ from lmswitch.system.io import (
     _load_yaml,
 )
 from lmswitch.system.checks import _docker_container, _is_running, _listening_ports
-from lmswitch.runtimes.llama import _extra_args, _start_llama_direct
-from lmswitch.runtimes.vllm import (
-    _vllm_args,
-    _start_vllm_direct,
-    _start_vllm_foreground,
-)
+from lmswitch.system.memory import _memory_check
+from lmswitch.runtimes.base import BaseRuntime, RunningState, runtime_registry
+from lmswitch.runtimes.llama import LlamaRuntime, _extra_args, _start_llama_direct
+from lmswitch.runtimes.vllm import VLLMRuntime, _vllm_args, _start_vllm_direct, _start_vllm_foreground
 from lmswitch.runtimes.systemd import _start_systemd
 from lmswitch.runtimes.wait import _wait_ready
-from lmswitch.system.memory import _memory_check
 
 __all__ = [
     "start_model",
     "stop_model",
+    "BaseRuntime",
+    "RunningState",
+    "runtime_registry",
     "_wait_ready",
     "_extra_args",
     "_vllm_args",
@@ -35,10 +47,20 @@ __all__ = [
     "_start_vllm_foreground",
     "_start_systemd",
     "_memory_check",
+    "LlamaRuntime",
+    "VLLMRuntime",
 ]
+
+# Register runtimes — called at import time
+runtime_registry.register("llama", LlamaRuntime)
+runtime_registry.register("vllm", VLLMRuntime)
 
 
 def start_model(name: str, yaml: dict) -> None:
+    """Start a model server using RAM guard + runtime dispatch.
+
+    This is the public entry point used by cli.py cmd_on / toggle().
+    """
     # Reason: refuse loads that would exceed available RAM — on a unified-memory
     # box an OOM can lock the machine and force a reboot. `force: true` overrides.
     ok, why = _memory_check(name, yaml)
@@ -46,37 +68,16 @@ def start_model(name: str, yaml: dict) -> None:
         print(f"  ✗ refusing to start {name}: {why}.")
         print("    Free memory (`lmswitch off <model>`) or set `force: true` in its yaml to override.")
         return
-    runtime = yaml.get("runtime", "llama")
+    runtime_name = yaml.get("runtime", "llama")
     restart = yaml.get("restart")
     if restart:
         _start_systemd(name, yaml, restart)
         return
-    if runtime == "vllm":
-        _start_vllm_direct(name, yaml)
-    else:
-        _start_llama_direct(name, yaml)
+    runtime_cls = runtime_registry.lookup(runtime_name)
+    runtime_cls().start(name, yaml)
 
 
 def stop_model(name: str, runtime: str) -> None:
-    if runtime == "vllm":
-        cid = _docker_container(name)
-        if cid:
-            print(f"Stopping vLLM {name} (container {cid[:12]})...")
-            subprocess.run(["docker", "stop", cid], check=False)
-            subprocess.run(["docker", "rm", cid], check=False)
-        else:
-            print(f"vLLM {name} not running")
-    else:
-        pid_file = RUN_DIR / name
-        if pid_file.exists():
-            pid = int(pid_file.read_text().strip())
-            try:
-                os.kill(pid, 0)
-                print(f"Stopping llama-server {name} (PID {pid})...")
-                os.kill(pid, 15)
-                pid_file.unlink()
-            except (ProcessLookupError, ValueError, OSError):
-                pid_file.unlink(missing_ok=True)
-                print(f"{name} not running")
-        else:
-            print(f"{name} not running")
+    """Stop a model server by runtime type."""
+    runtime_cls = runtime_registry.lookup(runtime)
+    runtime_cls().stop(name, {})

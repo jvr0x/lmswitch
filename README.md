@@ -81,15 +81,17 @@ systemd user units).
 ## Install
 
 ```bash
-# from the repo dir (e.g. ~/utils/lmswitch)
-./lmswitch init
+# from the repo/worktree dir (e.g. ~/utils/lmswitch)
+pip install -e .
+lmswitch init
 ```
 
 `init` asks where your models live (writes `ai-models/.lmswitch`), creates the
-`ai-models/` config dir, symlinks `~/.local/bin/lmswitch` → the script, and asks
-which sync targets to enable (opencode / hermes / grok — only the ones whose
-configs it finds). Ensure `~/.local/bin` is on your `$PATH`. (Manual alternative:
-`ln -sf "$PWD/lmswitch" ~/.local/bin/lmswitch`.)
+`ai-models/` config dir, and installs a `lmswitch` console script entry point
+(`lmswitch = "lmswitch.cli:main"`) in your Python environment — `~/.local/bin/lmswitch`
+for editable installs. It also asks which sync targets to enable (opencode /
+hermes / grok — only the ones whose configs it finds). Ensure `~/.local/bin` is
+on your `$PATH`.
 
 ## Getting started
 
@@ -194,8 +196,8 @@ first shard.
   pointing at `http://<SPARK_HOST>:<port>/v1`: **opencode** one provider per
   model, **hermes** the active model + a `custom_providers` entry per model (so
   they show in `/model`), **grok** one `[model.<id>]` table per model.
-  `SPARK_HOST` is a constant near the top of the script (`spark-8912.local`) —
-  change it if your host differs. See [Config sync](#config-sync).
+  `SPARK_HOST` is a constant in [`lmswitch.system.io`](lmswitch/system/io.py)
+  (`spark-8912.local`) — change it if your host differs. See [Config sync](#config-sync).
 
 ## Config sync
 
@@ -204,8 +206,8 @@ toggle / `sync` it rewrites the **currently-serving** models into each enabled
 target, every endpoint pointing at `http://<SPARK_HOST>:<port>/v1`. Your agent
 always sees the models that are actually up — right ports, right names — with no
 hand-editing and no calls to a model that isn't loaded. `SPARK_HOST` is a
-constant near the top of the script (`spark-8912.local`); set it to your serving
-host.
+constant defined in the package (`lmswitch.system.io.SPARK_HOST`); set it to your
+serving host.
 
 Targets are chosen during `lmswitch init` and stored as `SYNC_OPENCODE` /
 `SYNC_HERMES` / `SYNC_GROK` in `ai-models/.lmswitch` (only configs that exist on
@@ -235,15 +237,14 @@ finishes.
 
 ## Development & tests
 
-The tests need `pytest` and `pyyaml`. The easiest setup is a
-[uv](https://docs.astral.sh/uv/) virtualenv (the checked-in `.venv` is **not**
-portable — if it was copied from another machine/OS, delete and recreate it):
+The tests need `pytest` and `pyyaml`. Install the package in editable mode
+(`pip install -e .` from the worktree), then run the test suite:
 
 ```bash
 cd ~/utils/lmswitch
-rm -rf .venv                       # only if a stale/foreign .venv is present
 uv venv                            # create .venv from pyproject (Python >=3.10)
 uv pip install pytest pyyaml       # test deps (pyyaml is also a runtime dep)
+uv pip install -e .                # install the package itself
 ```
 
 Run the whole suite (prefix with `uv run` so it uses the venv):

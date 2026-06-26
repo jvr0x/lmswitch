@@ -16,8 +16,10 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent.parent.parent
 
-_DATA_ROOT = Path(os.environ.get("LMSWITCH_DATA_DIR", ""))
-if not _DATA_ROOT:
+_env_root = os.environ.get("LMSWITCH_DATA_DIR")
+if _env_root:
+    _DATA_ROOT = Path(_env_root).expanduser().resolve()
+else:
     _DATA_ROOT = SCRIPT_DIR / "ai-models"
 
 CONF_DIR = _DATA_ROOT

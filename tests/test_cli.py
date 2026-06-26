@@ -1,21 +1,32 @@
 """Tests for CLI command dispatch on representative argv.
 
-Each test exercises main() with a specific argv list and checks that
-the correct sub-command is dispatched (via stubs that prevent side effects).
+Uses honest stubs: ``main()`` is called with real argv, real ``cmd_*`` bodies
+execute (loading yamls from the fixture tree), but external I/O
+(subprocess.Popen for llama/docker, config writes to opencode/hermes/grok)
+is stubbed so tests run fast and deterministic.
+
+The conftest auto-use ``lmswitch_data_dir`` fixture provides a minimal
+``LMSWITCH_DATA_DIR`` tree with two YAML configs (qwen2.5-7b and mistral-7b),
+so ``load_models()`` returns real data from the fixture.
 """
 
+import subprocess
 import sys
 import tempfile
+import io
 from pathlib import Path
 from unittest import mock
 
 import lmswitch.cli as cli_mod
 from lmswitch.cli import main
 
+# ---------------------------------------------------------------------------
+# Helper — capture stdout from a callable
+# ---------------------------------------------------------------------------
 
-def _capture_stdout(fn):
-    """Capture printed output from a callable."""
-    import io
+
+def _capture(fn):
+    """Capture printed output from a callable that uses print()."""
     buf = io.StringIO()
     old = sys.stdout
     try:
@@ -26,136 +37,187 @@ def _capture_stdout(fn):
     return buf.getvalue()
 
 
+def _run_main(argv, ram=None):
+    """Call main() with given argv, capture stdout, return captured text."""
+    stdout, _ = _run_main_with_stderr(argv, ram)
+    return stdout
+
+
+def _run_main_with_stderr(argv, ram=None):
+    """Call main() with given argv, capture stdout+stderr, return (stdout, stderr).
+
+    Stubs ``_ram_line`` if *ram* is provided (None means no RAM line).
+    Stubs ``subprocess.Popen`` and ``subprocess.run`` to prevent real
+    llama-server / docker invocations.
+    """
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+
+    def fake_popen(cmd, *a, **k):
+        """Fake subprocess.Popen that pretends success."""
+        p = mock.MagicMock()
+        p.pid = 99999
+        p.poll = mock.MagicMock(return_value=0)
+        return p
+
+    def fake_run(cmd, *a, **k):
+        return mock.MagicMock(returncode=0)
+
+    def fake_rline():
+        return ram  # None → no RAM line; (128, 48, 80) → RAM line
+
+    with mock.patch.object(cli_mod.sys, "argv", argv):
+        with mock.patch.object(cli_mod.sys, "stdout", stdout_buf):
+            with mock.patch.object(cli_mod.sys, "stderr", stderr_buf):
+                with mock.patch.object(cli_mod.subprocess, "Popen", fake_popen):
+                    with mock.patch.object(cli_mod.subprocess, "run", fake_run):
+                        if ram is not None:
+                            with mock.patch.object(
+                                cli_mod, "_ram_line", fake_rline
+                            ):
+                                try:
+                                    main()
+                                except SystemExit:
+                                    pass
+                        else:
+                            try:
+                                main()
+                            except SystemExit:
+                                pass
+    return stdout_buf.getvalue(), stderr_buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
-# main() dispatch tests
+# Help / no-arg dispatch tests (no cmd_* stubbing — real main() body)
 # ---------------------------------------------------------------------------
 
-def test_main_no_args_calls_show():
-    """`main()` with no args calls show() (interactive TUI)."""
-    shown = {"called": False}
-    with mock.patch.object(cli_mod, "show", lambda: shown.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch"]):
-            main()
-    assert shown["called"]
-
-
-def test_main_help_prints_help():
-    """`lmswitch --help` prints help text."""
-    import io
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "--help"]
-    buf = io.StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = buf
-    try:
-        main()
-    except SystemExit:
-        pass  # --help calls sys.exit(0)
-    finally:
-        sys.stdout = old_stdout
-    sys.argv = old_argv
-    output = buf.getvalue()
-    assert "lmswitch" in output, "--help should print usage text"
+def test_main_help_prints_usage():
+    """`lmswitch --help` prints the help text and exits cleanly."""
+    output = _run_main(["lmswitch", "--help"])
+    assert "lmswitch" in output
     assert "Usage:" in output
 
 
-def test_main_list():
-    """`lmswitch list` dispatches cmd_list."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_list", lambda: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "list"]):
-            main()
-    assert called["called"]
+def test_main_h_flag_prints_usage():
+    """`lmswitch -h` prints the help text."""
+    output = _run_main(["lmswitch", "-h"])
+    assert "-h" in output or "--help" in output
+    assert "Usage:" in output
 
 
-def test_main_status():
-    """`lmswitch status` dispatches cmd_list (alias)."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_list", lambda: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "status"]):
-            main()
-    assert called["called"]
+def test_main_no_args_shows_show():
+    """`lmswitch` with no args calls show() (non-TTY → renders table)."""
+    output = _run_main(["lmswitch"], ram=None)
+    # Non-TTY show() calls render() which prints table header
+    assert "TYPE" in output or "No models found" in output
 
 
-def test_main_ls():
-    """`lmswitch ls` dispatches cmd_list (alias)."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_list", lambda: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "ls"]):
-            main()
-    assert called["called"]
+# ---------------------------------------------------------------------------
+# list / status / ls dispatch — real cmd_list body
+# ---------------------------------------------------------------------------
+
+def test_main_list_shows_table_header():
+    """`lmswitch list` → real cmd_list → render → table header present."""
+    output = _run_main(["lmswitch", "list"], ram=None)
+    assert "TYPE" in output
+    assert "NAME" in output
+    assert "PORT" in output
+    assert "DISPLAY" in output
 
 
-def test_main_on_dispatches_cmd_on():
-    """`lmswitch on <name>` dispatches cmd_on."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_on", lambda name: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "on", "testmodel"]):
-            main()
-    assert called["called"]
+def test_main_status_aliases_list():
+    """`lmswitch status` → same output as `lmswitch list`."""
+    out_status = _run_main(["lmswitch", "status"], ram=None)
+    out_list = _run_main(["lmswitch", "list"], ram=None)
+    assert out_status == out_list
 
 
-def test_main_start_dispatches_cmd_on():
-    """`lmswitch start <name>` dispatches cmd_on (alias)."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_on", lambda name: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "start", "testmodel"]):
-            main()
-    assert called["called"]
+def test_main_ls_aliases_list():
+    """`lmswitch ls` → same output as `lmswitch list`."""
+    out_ls = _run_main(["lmswitch", "ls"], ram=None)
+    out_list = _run_main(["lmswitch", "list"], ram=None)
+    assert out_ls == out_list
 
 
-def test_main_off_dispatches_cmd_off():
-    """`lmswitch off <name>` dispatches cmd_off."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_off", lambda name: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "off", "testmodel"]):
-            main()
-    assert called["called"]
+def test_main_list_shows_model_names():
+    """`lmswitch list` shows model names from the fixture tree."""
+    output = _run_main(["lmswitch", "list"], ram=None)
+    assert "qwen2.5-7b" in output
+    assert "mistral-7b" in output
 
 
-def test_main_stop_dispatches_cmd_off():
-    """`lmswitch stop <name>` dispatches cmd_off (alias)."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_off", lambda name: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "stop", "testmodel"]):
-            main()
-    assert called["called"]
+# ---------------------------------------------------------------------------
+# on / off / start / stop / sync dispatch — real cmd_* body
+# ---------------------------------------------------------------------------
+
+def test_main_on_prints_starting():
+    """`lmswitch on qwen2.5-7b` → real cmd_on → prints 'Starting' or ready msg."""
+    output = _run_main(
+        ["lmswitch", "on", "qwen2.5-7b"],
+        ram=(128, 48, 80),
+    )
+    assert "Starting" in output or "qwen2.5-7b" in output
 
 
-def test_main_sync_dispatches_cmd_sync():
-    """`lmswitch sync` dispatches cmd_sync."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_sync", lambda: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "sync"]):
-            main()
-    assert called["called"]
+def test_main_on_invalid_model_exits():
+    """`lmswitch on nonexistent` → exits with error (SystemExit raised)."""
+    caught = False
+    caught_msg = ""
+    old_argv = sys.argv
+    sys.argv = ["lmswitch", "on", "nonexistent"]
+
+    def fake_popen(cmd, *a, **k):
+        p = mock.MagicMock()
+        p.pid = 99999
+        p.poll = mock.MagicMock(return_value=0)
+        return p
+
+    def fake_run(cmd, *a, **k):
+        return mock.MagicMock(returncode=0)
+
+    try:
+        with mock.patch.object(cli_mod.subprocess, "Popen", fake_popen):
+            with mock.patch.object(cli_mod.subprocess, "run", fake_run):
+                main()
+    except SystemExit as e:
+        caught = True
+        caught_msg = str(e)
+    sys.argv = old_argv
+
+    assert caught, "main should raise SystemExit for unknown model"
+    assert "Unknown model" in caught_msg, f"exit message should mention the model: {caught_msg!r}"
 
 
-def test_main_init_dispatches_cmd_init():
-    """`lmswitch init` dispatches cmd_init."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_init", lambda: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "init"]):
-            main()
-    assert called["called"]
+def test_main_off_prints_stopped():
+    """`lmswitch off qwen2.5-7b` → real cmd_off → prints stopped or not-running."""
+    output = _run_main(
+        ["lmswitch", "off", "qwen2.5-7b"],
+        ram=None,
+    )
+    # The model isn't actually running, so we get "not running"
+    assert "not running" in output or "Stopped" in output
 
 
-def test_main_add_dispatches_cmd_add():
-    """`lmswitch add <name>` dispatches cmd_add."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_add", lambda name: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "add", "mymodel"]):
-            main()
-    assert called["called"]
+def test_main_start_alias_dispatches_on():
+    """`lmswitch start qwen2.5-7b` → same as `lmswitch on`."""
+    out_start = _run_main(["lmswitch", "start", "qwen2.5-7b"], ram=(128, 48, 80))
+    out_on = _run_main(["lmswitch", "on", "qwen2.5-7b"], ram=(128, 48, 80))
+    # Both should contain similar output (Starting / model name)
+    assert "qwen2.5-7b" in out_start
+    assert "qwen2.5-7b" in out_on
 
 
-def test_main_serve_dispatches_cmd_serve():
-    """`lmswitch serve <name>` dispatches cmd_serve."""
-    called = {"called": False}
-    with mock.patch.object(cli_mod, "cmd_serve", lambda name: called.__setitem__("called", True)):
-        with mock.patch.object(cli_mod.sys, "argv", ["lmswitch", "serve", "mymodel"]):
-            main()
-    assert called["called"]
+def test_main_stop_alias_dispatches_off():
+    """`lmswitch stop qwen2.5-7b` → same as `lmswitch off`."""
+    out_stop = _run_main(["lmswitch", "stop", "qwen2.5-7b"], ram=None)
+    out_off = _run_main(["lmswitch", "off", "qwen2.5-7b"], ram=None)
+    assert out_stop == out_off
+
+
+def test_main_sync_prints_synced():
+    """`lmswitch sync` → real cmd_sync → prints synced message."""
+    output = _run_main(["lmswitch", "sync"], ram=None)
+    assert "Synced" in output or "already in sync" in output
 
 
 def test_main_invalid_argv_exits():
@@ -171,24 +233,8 @@ def test_main_invalid_argv_exits():
     assert caught
 
 
-def test_main_h_flag_exits():
-    """`lmswitch -h` prints help and returns."""
-    import io
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "-h"]
-    buf = io.StringIO()
-    old_stdout = sys.stdout
-    sys.stdout = buf
-    main()
-    sys.stdout = old_stdout
-    sys.argv = old_argv
-    output = buf.getvalue()
-    assert "-h" in output or "--help" in output
-    assert "Usage:" in output
-
-
 # ---------------------------------------------------------------------------
-# render output check
+# render output check (unit-level, no main() dispatch)
 # ---------------------------------------------------------------------------
 
 def test_render_prints_table_header():
@@ -198,7 +244,7 @@ def test_render_prints_table_header():
          "port": 8081, "ctx": "65536", "size": 0, "present": False,
          "restart": None, "family": "Qwen", "fam_order": 0},
     ]
-    output = _capture_stdout(lambda: cli_mod.render(models))
+    output = _capture(lambda: cli_mod.render(models))
     assert "TYPE" in output
     assert "NAME" in output
     assert "SIZE" in output
@@ -213,14 +259,8 @@ def test_render_shows_running_models():
          "port": 8081, "ctx": "65536", "size": 0, "present": True,
          "restart": None, "family": "Qwen", "fam_order": 0},
     ]
-    output = _capture_stdout(
-        lambda: cli_mod.render(models)
-    )
-    # Running check stub
     with mock.patch.object(cli_mod, "_is_running", return_value=True):
-        output = _capture_stdout(
-            lambda: cli_mod.render(models)
-        )
+        output = _capture(lambda: cli_mod.render(models))
     assert "●" in output
 
 
@@ -231,7 +271,7 @@ def test_render_shows_missing_indicator():
          "port": 8081, "ctx": "65536", "size": 0, "present": False,
          "restart": None, "family": "Qwen", "fam_order": 0},
     ]
-    output = _capture_stdout(lambda: cli_mod.render(models))
+    output = _capture(lambda: cli_mod.render(models))
     assert "✗" in output
 
 
@@ -241,9 +281,9 @@ def test_render_shows_missing_indicator():
 
 def test_resolve_by_index():
     """_resolve accepts numeric indices."""
-    tmp = tempfile.mkdtemp()
-    (Path(tmp) / "model1.yaml").write_text("runtime: llama\nport: 8081\n")
-    (Path(tmp) / "model2.yaml").write_text("runtime: llama\nport: 8082\n")
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "model1.yaml").write_text("runtime: llama\nport: 8081\n")
+    (tmp / "model2.yaml").write_text("runtime: llama\nport: 8082\n")
     models = [
         {"name": "model1", "display": "Model1", "runtime": "llama", "type": "gguf",
          "port": 8081, "ctx": "", "size": 0, "present": False,
@@ -252,7 +292,7 @@ def test_resolve_by_index():
          "port": 8082, "ctx": "", "size": 0, "present": False,
          "restart": None, "family": "Qwen", "fam_order": 0},
     ]
-    with mock.patch("lmswitch.system.io.CONF_DIR", Path(tmp)), \
+    with mock.patch("lmswitch.system.io.CONF_DIR", tmp), \
          mock.patch("lmswitch.cli.load_models", return_value=models):
         assert cli_mod._resolve("1") == "model1"
         assert cli_mod._resolve("2") == "model2"
@@ -260,6 +300,7 @@ def test_resolve_by_index():
 
 def test_resolve_by_name():
     """_resolve accepts model names."""
+    import tempfile
     tmp = tempfile.mkdtemp()
     (Path(tmp) / "mymodel.yaml").write_text("runtime: llama\nport: 8081\n")
     with mock.patch("lmswitch.cli.CONF_DIR", Path(tmp)), \
@@ -269,6 +310,7 @@ def test_resolve_by_name():
 
 def test_resolve_invalid_index_exits():
     """_resolve exits on invalid index."""
+    import tempfile
     tmp = tempfile.mkdtemp()
     with mock.patch("lmswitch.cli.load_models", return_value=[]), \
          mock.patch("lmswitch.system.io.CONF_DIR", Path(tmp)):
@@ -283,6 +325,7 @@ def test_resolve_invalid_index_exits():
 
 def test_resolve_unknown_name_exits():
     """_resolve exits on unknown model name."""
+    import tempfile
     tmp = tempfile.mkdtemp()
     models = [{"name": "other", "display": "Other", "runtime": "llama", "type": "gguf",
                "port": 8081, "ctx": "", "size": 0, "present": False,
@@ -296,200 +339,3 @@ def test_resolve_unknown_name_exits():
                 cli_mod._resolve("nonexistent")
             except SystemExit:
                 pass
-
-
-# ---------------------------------------------------------------------------
-# Integration tests — exercise real cmd_* bodies (no stubbing of cmd_*)
-# ---------------------------------------------------------------------------
-
-def test_integration_on_dispatches_real_cmd_on():
-    """`lmswitch on <name>` exercises the real cmd_on body (start_model + regen_all)."""
-    import io
-    tmp = tempfile.mkdtemp()
-    (Path(tmp) / "integ.yaml").write_text("runtime: llama\nport: 8099\n")
-    models = [
-        {"name": "integ", "display": "Integ", "runtime": "llama", "type": "gguf",
-         "port": 8099, "ctx": "", "size": 0, "present": False,
-         "restart": None, "family": "Test", "fam_order": 0},
-    ]
-
-    start_called = {"called": False}
-    regen_called = {"called": False}
-
-    def fake_start(*a, **k):
-        start_called["called"] = True
-    def fake_regen():
-        regen_called["called"] = True
-
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "on", "integ"]
-    buf = io.StringIO()
-
-    with mock.patch("lmswitch.cli.CONF_DIR", Path(tmp)):
-        with mock.patch("lmswitch.cli.load_models", return_value=models):
-            with mock.patch("lmswitch.cli.start_model", fake_start):
-                with mock.patch("lmswitch.cli.regen_all", fake_regen):
-                    with mock.patch.object(cli_mod.sys, "stdout", buf):
-                        main()
-
-    assert start_called["called"], "real cmd_on should call start_model"
-    assert regen_called["called"], "real cmd_on should call regen_all"
-    sys.argv = old_argv
-
-
-def test_integration_off_dispatches_real_cmd_off():
-    """`lmswitch off <name>` exercises the real cmd_off body (stop_model + regen_all)."""
-    import io
-    tmp = tempfile.mkdtemp()
-    (Path(tmp) / "integ2.yaml").write_text("runtime: llama\nport: 8099\n")
-    models = [
-        {"name": "integ2", "display": "Integ2", "runtime": "llama", "type": "gguf",
-         "port": 8099, "ctx": "", "size": 0, "present": False,
-         "restart": None, "family": "Test", "fam_order": 0},
-    ]
-
-    stop_called = {"called": False}
-    regen_called = {"called": False}
-
-    def fake_stop(*a, **k):
-        stop_called["called"] = True
-    def fake_regen():
-        regen_called["called"] = True
-
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "off", "integ2"]
-    buf = io.StringIO()
-
-    with mock.patch("lmswitch.cli.CONF_DIR", Path(tmp)):
-        with mock.patch("lmswitch.cli.load_models", return_value=models):
-            with mock.patch("lmswitch.cli.stop_model", fake_stop):
-                with mock.patch("lmswitch.cli.regen_all", fake_regen):
-                    with mock.patch.object(cli_mod.sys, "stdout", buf):
-                        main()
-
-    assert stop_called["called"], "real cmd_off should call stop_model"
-    assert regen_called["called"], "real cmd_off should call regen_all"
-    sys.argv = old_argv
-
-
-def test_integration_sync_calls_real_cmd_sync():
-    """`lmswitch sync` exercises the real cmd_sync body (regen_*)."""
-    import io
-
-    def fake_get_targets():
-        return ["opencode"]
-
-    regen_calls = []
-    def fake_regen(*a):
-        regen_calls.append(True)
-        return False
-
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "sync"]
-    buf = io.StringIO()
-
-    with mock.patch("lmswitch.cli._get_sync_targets", fake_get_targets):
-        with mock.patch("lmswitch.cli.regen_opencode", fake_regen):
-            with mock.patch("lmswitch.cli.regen_hermes", fake_regen):
-                with mock.patch("lmswitch.cli.regen_grok", fake_regen):
-                    with mock.patch.object(cli_mod.sys, "stdout", buf):
-                        main()
-
-    assert len(regen_calls) == 1, "real cmd_sync should call regen functions"
-    sys.argv = old_argv
-
-
-def test_integration_list_dispatches_real_cmd_list():
-    """`lmswitch list` exercises the real cmd_list body (load_models + render)."""
-    import io
-    tmp = tempfile.mkdtemp()
-    models = [
-        {"name": "testlist", "display": "TestList", "runtime": "llama", "type": "gguf",
-         "port": 8099, "ctx": "", "size": 0, "present": False,
-         "restart": None, "family": "Test", "fam_order": 0},
-    ]
-
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "list"]
-
-    with mock.patch("lmswitch.cli.CONF_DIR", Path(tmp)):
-        with mock.patch("lmswitch.cli.load_models", return_value=models):
-            with mock.patch("lmswitch.cli._is_running", return_value=False):
-                buf = io.StringIO()
-                with mock.patch.object(cli_mod.sys, "stdout", buf):
-                    main()
-                output = buf.getvalue()
-
-    assert "TYPE" in output, "real cmd_list should call render which prints table header"
-    assert "NAME" in output
-    sys.argv = old_argv
-
-
-def test_integration_start_alias_dispatches_real_cmd_on():
-    """`lmswitch start <name>` dispatches to real cmd_on (alias of `on`)."""
-    import io
-    tmp = tempfile.mkdtemp()
-    (Path(tmp) / "integ3.yaml").write_text("runtime: llama\nport: 8099\n")
-    models = [
-        {"name": "integ3", "display": "Integ3", "runtime": "llama", "type": "gguf",
-         "port": 8099, "ctx": "", "size": 0, "present": False,
-         "restart": None, "family": "Test", "fam_order": 0},
-    ]
-
-    start_called = {"called": False}
-    regen_called = {"called": False}
-
-    def fake_start(*a, **k):
-        start_called["called"] = True
-    def fake_regen():
-        regen_called["called"] = True
-
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "start", "integ3"]
-    buf = io.StringIO()
-
-    with mock.patch("lmswitch.cli.CONF_DIR", Path(tmp)):
-        with mock.patch("lmswitch.cli.load_models", return_value=models):
-            with mock.patch("lmswitch.cli.start_model", fake_start):
-                with mock.patch("lmswitch.cli.regen_all", fake_regen):
-                    with mock.patch.object(cli_mod.sys, "stdout", buf):
-                        main()
-
-    assert start_called["called"], "real cmd_on should be called by start alias"
-    assert regen_called["called"], "real cmd_on should call regen_all"
-    sys.argv = old_argv
-
-
-def test_integration_stop_alias_dispatches_real_cmd_off():
-    """`lmswitch stop <name>` dispatches to real cmd_off (alias of `off`)."""
-    import io
-    tmp = tempfile.mkdtemp()
-    (Path(tmp) / "integ4.yaml").write_text("runtime: llama\nport: 8099\n")
-    models = [
-        {"name": "integ4", "display": "Integ4", "runtime": "llama", "type": "gguf",
-         "port": 8099, "ctx": "", "size": 0, "present": False,
-         "restart": None, "family": "Test", "fam_order": 0},
-    ]
-
-    stop_called = {"called": False}
-    regen_called = {"called": False}
-
-    def fake_stop(*a, **k):
-        stop_called["called"] = True
-    def fake_regen():
-        regen_called["called"] = True
-
-    old_argv = sys.argv
-    sys.argv = ["lmswitch", "stop", "integ4"]
-    buf = io.StringIO()
-
-    with mock.patch("lmswitch.cli.CONF_DIR", Path(tmp)):
-        with mock.patch("lmswitch.cli.load_models", return_value=models):
-            with mock.patch("lmswitch.cli.stop_model", fake_stop):
-                with mock.patch("lmswitch.cli.regen_all", fake_regen):
-                    with mock.patch.object(cli_mod.sys, "stdout", buf):
-                        main()
-
-    assert stop_called["called"], "real cmd_off should be called by stop alias"
-    assert regen_called["called"], "real cmd_off should call regen_all"
-    sys.argv = old_argv

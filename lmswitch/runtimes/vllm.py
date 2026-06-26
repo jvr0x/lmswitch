@@ -1,11 +1,15 @@
 """vLLM (Docker) runtime."""
 
+from __future__ import annotations
+
+import os
 import subprocess
 import time
 from pathlib import Path
 
 from lmswitch.system.io import HOME, RUN_DIR, SCRIPT_DIR
-from lmswitch.system.checks import _docker_container
+from lmswitch.runtimes.base import BaseRuntime, RunningState, runtime_registry
+from lmswitch.runtimes.wait import _wait_ready
 
 
 def _vllm_args(yaml: dict) -> list[str]:
@@ -37,89 +41,116 @@ def _vllm_args(yaml: dict) -> list[str]:
     return args
 
 
+class VLLMRuntime(BaseRuntime):
+    """vLLM model runtime using Docker."""
+
+    def _build_cmd(self, name: str, yaml: dict, detached: bool = True) -> list[str]:
+        """Build the docker run command for this model."""
+        models_dir = yaml.get("_models_dir")
+        if models_dir is None:
+            from lmswitch.system.io import _models_dir
+            models_dir = _models_dir()
+        model_path = models_dir / yaml["model"]
+        port = yaml.get("port", 0)
+        ctx = yaml.get("ctx", 65536)
+        gpu_mem = yaml.get("gpu_memory_utilization", 0.15)
+        image = yaml.get("image", "vllm/vllm-openai:cu130-nightly")
+        wheels = SCRIPT_DIR / "spark-vllm-docker" / "wheels"
+
+        vllm_args = _vllm_args(yaml)
+        detach_flag = ["-d"] if detached else []
+
+        cmd = [
+            "docker", "run", *detach_flag,
+            "--name", f"vllm-{name}",
+            "--gpus", "all",
+            "--network", "host",
+            "--shm-size", "8g",
+            "--log-driver", "json-file",
+            "--log-opt", "max-size=10m",
+            "--log-opt", "max-file=3",
+            "-v", f"{model_path}:{model_path}:ro",
+            "-v", f"{HOME}/.cache/huggingface/hub:/root/.cache/huggingface/hub",
+            "-v", f"{HOME}/.cache/huggingface/token:/root/.cache/huggingface/token",
+        ]
+        if wheels.exists():
+            cmd += ["-v", f"{wheels}:/wheels:ro"]
+
+        cmd += [
+            image,
+            str(model_path),
+            f"--served-model-name={name}",
+            f"--port={port}",
+            "--host=0.0.0.0",
+            f"--max-model-len={ctx}",
+            "--max-num-seqs=32",
+            "--tensor-parallel-size=1",
+            f"--gpu-memory-utilization={gpu_mem}",
+            "--disable-log-stats",
+        ] + vllm_args
+        return cmd
+
+    def start(self, name: str, yaml: dict) -> RunningState:
+        from lmswitch.system.checks import _docker_container
+        existing = _docker_container(name)
+        if existing:
+            print(f"vLLM {name} already running (container {existing[:12]})")
+            return RunningState("ready")
+
+        port = yaml.get("port", 0)
+        print(f"Starting vLLM {name} on port {port}...")
+        print(f"  Image: {yaml.get('image', 'vllm/vllm-openai:cu130-nightly')}")
+
+        subprocess.run(["docker", "rm", "-f", f"vllm-{name}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+        cmd = self._build_cmd(name, yaml, detached=True)
+        result = subprocess.run(cmd, check=False)
+        if result.returncode != 0:
+            print(f"  ✗ docker run failed (exit {result.returncode}); not waiting for readiness.")
+            return RunningState("dead", detail=f"docker exit {result.returncode}")
+
+        try:
+            timeout = int(yaml.get("ready_timeout", 600))
+        except (ValueError, TypeError):
+            timeout = 600
+        status = _wait_ready(name, port, timeout, lambda: _docker_container(name) is not None)
+        if status == "ready":
+            print(f"  Ready on port {port}")
+        elif status == "dead":
+            print(f"  ✗ {name} container exited during startup — "
+                  f"check: docker logs vllm-{name}")
+        else:
+            print(f"  WARNING: {name} did not become ready in {timeout}s "
+                  f"(still loading? check docker logs vllm-{name})")
+        return RunningState(status)
+
+    def stop(self, name: str, yaml: dict) -> None:
+        from lmswitch.system.checks import _docker_container
+        cid = _docker_container(name)
+        if cid:
+            print(f"Stopping vLLM {name} (container {cid[:12]})...")
+            subprocess.run(["docker", "stop", cid], check=False)
+            subprocess.run(["docker", "rm", cid], check=False)
+        else:
+            print(f"vLLM {name} not running")
+
+    def is_running(self, name: str, runtime_name: str) -> bool:
+        from lmswitch.system.checks import _docker_container
+        return _docker_container(name) is not None
+
+    def is_ready(self, name: str, port: int, timeout: int = 300) -> str:
+        from lmswitch.system.checks import _docker_container
+        status = _wait_ready(name, port, timeout, lambda: _docker_container(name) is not None)
+        return status
+
+
+# Keep module-level functions for backward compat
 def _start_vllm_direct(name: str, yaml: dict) -> None:
-    models_dir = yaml.get("_models_dir")
-    if models_dir is None:
-        from lmswitch.system.io import _models_dir
-        models_dir = _models_dir()
-    existing = _docker_container(name)
-    if existing:
-        print(f"vLLM {name} already running (container {existing[:12]})")
-        return
-
-    model_path = models_dir / yaml["model"]
-    port = yaml.get("port", 0)
-    ctx = yaml.get("ctx", 65536)
-    gpu_mem = yaml.get("gpu_memory_utilization", 0.15)
-    image = yaml.get("image", "vllm/vllm-openai:cu130-nightly")
-    wheels = SCRIPT_DIR / "spark-vllm-docker" / "wheels"
-
-    vllm_args = _vllm_args(yaml)
-
-    cmd = [
-        "docker", "run", "-d",
-        "--name", f"vllm-{name}",
-        "--gpus", "all",
-        "--network", "host",
-        "--shm-size", "8g",
-        "--log-driver", "json-file",
-        "--log-opt", "max-size=10m",
-        "--log-opt", "max-file=3",
-        "-v", f"{model_path}:{model_path}:ro",
-        "-v", f"{HOME}/.cache/huggingface/hub:/root/.cache/huggingface/hub",
-        "-v", f"{HOME}/.cache/huggingface/token:/root/.cache/huggingface/token",
-    ]
-    if wheels.exists():
-        cmd += ["-v", f"{wheels}:/wheels:ro"]
-
-    cmd += [
-        image,
-        str(model_path),
-        f"--served-model-name={name}",
-        f"--port={port}",
-        "--host=0.0.0.0",
-        f"--max-model-len={ctx}",
-        "--max-num-seqs=32",
-        "--tensor-parallel-size=1",
-        f"--gpu-memory-utilization={gpu_mem}",
-        "--disable-log-stats",
-    ] + vllm_args
-
-    print(f"Starting vLLM {name} on port {port}...")
-    print(f"  Model: {model_path}")
-    print(f"  Image: {image}")
-
-    # Clear any stale container with this name before `docker run`. We already
-    # returned above if it was running, so this only removes a stopped/created/
-    # dead container, or no-ops. Without this, `docker run --name vllm-<name>`
-    # fails with a name conflict on a leftover exited container.
-    subprocess.run(["docker", "rm", "-f", f"vllm-{name}"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
-        print(f"  ✗ docker run failed (exit {result.returncode}); not waiting for readiness.")
-        return
-
-    # Reason: returncode-based readiness poll that also detects a crashed
-    # container, so we don't spin the full timeout against a dead port.
-    try:
-        timeout = int(yaml.get("ready_timeout", 600))
-    except (ValueError, TypeError):
-        timeout = 600
-    from lmswitch.runtimes.wait import _wait_ready
-    status = _wait_ready(name, port, timeout, lambda: _docker_container(name) is not None)
-    if status == "ready":
-        print(f"  Ready on port {port}")
-    elif status == "dead":
-        print(f"  ✗ {name} container exited during startup — "
-              f"check: docker logs vllm-{name}")
-    else:
-        print(f"  WARNING: {name} did not become ready in {timeout}s "
-              f"(still loading? check docker logs vllm-{name})")
-
+    VLLMRuntime().start(name, yaml)
 
 def _start_vllm_foreground(name: str, yaml: dict) -> None:
+    """Foreground serve — used by systemd for restart-managed models."""
     models_dir = yaml.get("_models_dir")
     if models_dir is None:
         from lmswitch.system.io import _models_dir
@@ -160,5 +191,4 @@ def _start_vllm_foreground(name: str, yaml: dict) -> None:
     ] + vllm_args
 
     print(f"Serving {name} on port {port} (systemd-managed)...")
-    import os
     os.execvp("docker", cmd)
