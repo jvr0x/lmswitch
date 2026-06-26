@@ -72,7 +72,6 @@ lmswitch off <name|#>     # stop a model
 lmswitch sync             # regenerate opencode.json from currently-serving models
 lmswitch add  <name>      # create a model config interactively
 lmswitch serve <name>     # run a model in the foreground (used by systemd)
-lmswitch migrate          # migrate legacy ~/.config/llama-models/*.env configs to YAML
 lmswitch init             # bootstrap ai-models/, .lmswitch, and the symlink
 ```
 
@@ -164,3 +163,7 @@ python3 tests/test_vllm_and_abort.py   # vLLM start, readiness, RAM guard, Ctrl-
 
 Both are pure unit tests — `subprocess` / Docker / `curl` are stubbed, so they
 run anywhere (no GPU, no models, no Docker required).
+
+## License
+
+[Apache-2.0](LICENSE) © 2026 jvr0x.

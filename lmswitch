@@ -16,6 +16,9 @@ process; vLLM models run in Docker. Per-model `restart: on-failure` opts
 into systemd-managed auto-restart.
 """
 
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 jvr0x
+
 from __future__ import annotations
 
 import os
@@ -920,93 +923,6 @@ def _start_vllm_foreground(name: str, yaml: dict) -> None:
     os.execvp("docker", cmd)
 
 
-def cmd_migrate() -> None:
-    old_dir = HOME / ".config" / "llama-models"
-    if not old_dir.exists():
-        print(f"Nothing to migrate: {old_dir} does not exist")
-        return
-
-    KEY_MAP = {
-        "LLAMA_MODEL": "model",
-        "LLAMA_PORT": "port",
-        "LLAMA_CTX": "ctx",
-        "LLAMA_DISPLAY_NAME": "display_name",
-        "LLAMA_GPU_LAYERS": "gpu_layers",
-        "LLAMA_THREADS": "threads",
-        "LLAMA_BATCH": "batch",
-        "LLAMA_UBATCH": "ubatch",
-        "LLAMA_MMPROJ": "mmproj",
-        "LLAMA_BIN": "llama_bin",
-        "RUNTIME": "runtime",
-        "VLLM_IMAGE": "image",
-        "GPU_MEM_UTIL": "gpu_memory_utilization",
-        "VLLM_TOOL_PARSER": "tool_call_parser",
-        "VLLM_REASONING_PARSER": "reasoning_parser",
-        "VLLM_REASONING_PARSER_PLUGIN": "reasoning_parser_plugin",
-        "VLLM_TRUST_REMOTE_CODE": "trust_remote_code",
-        "VLLM_LIMIT_MM": "limit_mm_per_prompt",
-        "VLLM_NO_CHAT_TEMPLATE": "no_chat_template",
-        "VLLM_ATTENTION_BACKEND": "attention_backend",
-        "VLLM_ENFORCE_EAGER": "enforce_eager",
-        "VLLM_MAX_SEQS": "max_num_seqs",
-        "VLLM_LOAD_FORMAT": "load_format",
-    }
-
-    migrated = 0
-    skipped = 0
-    for env_file in sorted(old_dir.glob("*.env")):
-        name = env_file.stem
-        dest = CONF_DIR / f"{name}.yaml"
-        if dest.exists():
-            skipped += 1
-            continue
-
-        data: dict = {}
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            val = val.strip()
-            if val.startswith('"') and val.endswith('"'):
-                val = val[1:-1]
-            elif val.startswith("'") and val.endswith("'"):
-                val = val[1:-1]
-            data[key] = val
-
-        if not data:
-            continue
-
-        yaml_lines: list[str] = []
-        for old_key, new_key in KEY_MAP.items():
-            if old_key in data:
-                val = data[old_key]
-                if new_key == "extra_args":
-                    if val:
-                        yaml_lines.append("extra_args:")
-                        for arg in val.split():
-                            yaml_lines.append(f'  - "{arg}"')
-                elif new_key in ("trust_remote_code", "no_chat_template", "enforce_eager"):
-                    yaml_lines.append(f"{new_key}: {val}")
-                elif new_key in ("port", "ctx", "gpu_layers", "threads", "batch", "ubatch",
-                                  "gpu_memory_utilization"):
-                    yaml_lines.append(f"{new_key}: {val}")
-                else:
-                    yaml_lines.append(f'{new_key}: "{val}"')
-
-        if "runtime" not in data:
-            yaml_lines.insert(0, "runtime: llama")
-
-        dest.write_text("\n".join(yaml_lines) + "\n")
-        migrated += 1
-        print(f"  Migrated: {name}.env -> {dest}")
-
-    print(f"\nDone. Migrated {migrated}, skipped {skipped} (already exist).")
-
-
 def cmd_add(name: str) -> None:
     path = CONF_DIR / f"{name}.yaml"
     if path.exists():
@@ -1072,7 +988,6 @@ Usage:
   lmswitch init             bootstrap ai-models/ dir, config, and symlink
   lmswitch add  <name>      create a new YAML config interactively
   lmswitch serve <name>     run a model in the foreground (for systemd)
-  lmswitch migrate          migrate old .env configs to YAML
   lmswitch -h, --help       show this help
 """
 
@@ -1096,8 +1011,6 @@ def main() -> None:
             cmd_sync()
         elif args[0] == "init":
             cmd_init()
-        elif args[0] == "migrate":
-            cmd_migrate()
         elif args[0] == "add" and len(args) == 2:
             cmd_add(args[1])
         elif args[0] == "serve" and len(args) == 2:
