@@ -2,6 +2,7 @@
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -145,18 +146,25 @@ def cmd_init() -> None:
         print("\nAborted.")
         return
 
-    bin_dir = HOME / ".local" / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    link = bin_dir / "lmswitch"
-    # Write a small wrapper that runs `python -m lmswitch`
-    link.write_text(
-        "#!/usr/bin/env python3\n"
-        'import sys\n'
-        'from lmswitch.cli import main\n'
-        "main()\n"
-    )
-    link.chmod(0o755)
-    print(f"  Installed: {link} (python -m lmswitch wrapper)")
+    # `pip install -e .` already provides a `lmswitch` console script bound to
+    # the right interpreter. Only fall back to a hand-written wrapper if no
+    # entry point is reachable on PATH, and pin its shebang to the interpreter
+    # that actually has the package importable (this one) — `/usr/bin/env
+    # python3` would resolve to system python, which usually can't import the
+    # editable install and would break the command.
+    if shutil.which("lmswitch"):
+        print("  Console script already installed (pip entry point); skipping wrapper.")
+    else:
+        bin_dir = HOME / ".local" / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        link = bin_dir / "lmswitch"
+        link.write_text(
+            f"#!{sys.executable}\n"
+            "from lmswitch.cli import main\n"
+            "main()\n"
+        )
+        link.chmod(0o755)
+        print(f"  Installed wrapper: {link}")
 
     existing_cfg = _read_config()
     sync_cfg_lines: list[str] = []
@@ -245,7 +253,6 @@ def cmd_on(target: str) -> None:
     name = _resolve(target)
     yaml_path = CONF_DIR / f"{name}.yaml"
     yaml = _load_yaml(yaml_path)
-    runtime = yaml.get("runtime", "llama")
     start_model(name, yaml)
     regen_all()
 

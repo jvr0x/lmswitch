@@ -110,16 +110,13 @@ class LlamaRuntime(BaseRuntime):
         return _is_running(name, runtime_name)
 
     def is_ready(self, name: str, port: int, timeout: int = 300) -> str:
-        from lmswitch.system.checks import _is_running
-        # Check if process is alive
+        # Poll until the port answers or the backing process dies.
         pid_file = RUN_DIR / name
         if pid_file.exists():
             try:
                 pid = int(pid_file.read_text().strip())
-                alive = lambda: True  # we'll check process below
-                status = _wait_ready(name, port, timeout,
-                                     lambda: self._proc_alive(pid))
-                return status
+                return _wait_ready(name, port, timeout,
+                                   lambda: self._proc_alive(pid))
             except (ValueError, OSError):
                 return "dead"
         return "dead"

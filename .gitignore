@@ -4,3 +4,4 @@ ai-models/
 ._*
 .venv/
 lmswitch.egg-info/
+running/
