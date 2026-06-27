@@ -82,7 +82,26 @@ gpu_memory_utilization: 0.55
 | `load_format` | — | `--load-format=<v>` |
 | `ready_timeout` | 600 | readiness wait |
 | `force` / `restart` | — | as above |
+| `extra_mounts` | — | extra docker `-v` bind mounts (vLLM only, see below) |
 | `extra_args` | — | **any other `vllm serve` flag** |
+
+## extra_mounts — mount extra paths into the container (vLLM only)
+
+`extra_args` are appended **after** the image, so they go to `vllm serve`
+*inside* the container — they cannot add a `docker -v`. When a flag needs a file
+that isn't already mounted (the only mounts are the model dir and
+`~/.cache/huggingface/hub`), use `extra_mounts`. Each entry is a
+`host:container[:ro]` spec (same syntax as `docker run -v`); the host path may
+use `~` and `$VARS`. List or shell-split string, like `extra_args`:
+
+```yaml
+extra_mounts: ["~/models/foo/drafter:/drafter:ro"]   # then reference /drafter in extra_args
+extra_mounts: "/data/cache:/cache:ro"
+```
+
+Tip: a speculative-decoding drafter referenced by **HF id** doesn't need this —
+it resolves from the already-mounted `~/.cache/huggingface/hub`. Only reach for
+`extra_mounts` when you must point a flag at an absolute container path.
 
 ## extra_args — pass ANY flag
 

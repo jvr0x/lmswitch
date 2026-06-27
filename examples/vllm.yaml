@@ -41,4 +41,11 @@ gpu_memory_utilization: 0.55                   # --gpu-memory-utilization
 #  - extra_args run inside the container, so any file path must be one that's
 #    mounted into it (the model dir and ~/.cache/huggingface are).
 #
+# extra_mounts — extra docker `-v` bind mounts (vLLM only). Because extra_args
+# go to `vllm serve` INSIDE the container they can't add a mount; use this to
+# expose a host path a flag needs (e.g. a spec-decode drafter at a fixed
+# container path). `host:container[:ro]`, host may use ~ and $VARS; list or
+# shell-split string.
+# extra_mounts: ["~/models/foo/drafter:/drafter:ro"]   # ref /drafter in extra_args
+#
 # restart: on-failure                          # opt into systemd-managed auto-restart

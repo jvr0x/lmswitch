@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -10,6 +11,29 @@ from pathlib import Path
 from lmswitch.system.io import HOME, RUN_DIR, SCRIPT_DIR
 from lmswitch.runtimes.base import BaseRuntime, RunningState, runtime_registry
 from lmswitch.runtimes.wait import _wait_ready
+
+
+def _extra_mounts(yaml: dict) -> list[str]:
+    """Extra docker `-v` bind mounts for the vLLM container.
+
+    Each entry is a `host:container[:ro]` spec (same syntax as `docker run -v`).
+    The host path may use `~` and `$VARS`. These are `docker run` options, so
+    they're emitted BEFORE the image — unlike `extra_args`, which are appended
+    after the image and go to `vllm serve` inside the container. Accepts a YAML
+    list or a single shell-split string:
+
+        extra_mounts: ["~/models/foo/drafter:/drafter:ro"]
+        extra_mounts: "~/models/foo/drafter:/drafter:ro"
+    """
+    raw = yaml.get("extra_mounts") or []
+    if isinstance(raw, str):
+        raw = shlex.split(raw)
+    args: list[str] = []
+    for spec in raw:
+        host, sep, rest = str(spec).partition(":")
+        host = os.path.expanduser(os.path.expandvars(host))
+        args += ["-v", f"{host}{sep}{rest}" if sep else host]
+    return args
 
 
 def _vllm_args(yaml: dict) -> list[str]:
@@ -75,6 +99,7 @@ class VLLMRuntime(BaseRuntime):
         ]
         if wheels.exists():
             cmd += ["-v", f"{wheels}:/wheels:ro"]
+        cmd += _extra_mounts(yaml)
 
         cmd += [
             image,
@@ -176,6 +201,7 @@ def _start_vllm_foreground(name: str, yaml: dict) -> None:
     ]
     if wheels.exists():
         cmd += ["-v", f"{wheels}:/wheels:ro"]
+    cmd += _extra_mounts(yaml)
 
     cmd += [
         image,

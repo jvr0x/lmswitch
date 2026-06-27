@@ -46,6 +46,34 @@ def test_stale_container_cleared_before_run():
     assert rm_idx < run_idx, "docker rm must run before docker run"
 
 
+def test_extra_mounts_emitted_before_image():
+    """extra_mounts become docker -v options BEFORE the image, with ~ expanded;
+    extra_args still land after the image (they go to vllm serve)."""
+    yaml = {"runtime": "vllm", "model": "AEON-7/heretic", "port": 8120,
+            "ctx": 262144, "image": "ghcr.io/aeon-7/aeon-vllm-ultimate:latest",
+            "gpu_memory_utilization": 0.85,
+            "extra_mounts": ["~/models/AEON-7/heretic/drafter:/drafter:ro"],
+            "extra_args": ["--quantization", "compressed-tensors"],
+            "_models_dir": Path(tempfile.mkdtemp())}
+    cmd = vllm_mod.VLLMRuntime()._build_cmd("m", yaml)
+    img_i = cmd.index("ghcr.io/aeon-7/aeon-vllm-ultimate:latest")
+    mnt = next(a for a in cmd if a.endswith(":/drafter:ro"))
+    mnt_i = cmd.index(mnt)
+    assert cmd[mnt_i - 1] == "-v", "mount must be a -v option"
+    assert mnt_i < img_i, "extra_mounts must precede the image"
+    assert mnt.startswith(str(Path.home())), "~ must be expanded to an absolute host path"
+    assert cmd.index("compressed-tensors") > img_i, "extra_args stay after the image"
+
+
+def test_extra_mounts_accepts_string():
+    """A single shell-split string works like the list form."""
+    yaml = {"runtime": "vllm", "model": "m", "port": 8120,
+            "extra_mounts": "/data/foo:/foo:ro", "_models_dir": Path(tempfile.mkdtemp())}
+    cmd = vllm_mod.VLLMRuntime()._build_cmd("m", yaml)
+    assert "/data/foo:/foo:ro" in cmd
+    assert cmd[cmd.index("/data/foo:/foo:ro") - 1] == "-v"
+
+
 def test_graceful_keyboardinterrupt():
     """Ctrl-C anywhere under main() must exit cleanly, not raise."""
     def boom():
@@ -145,6 +173,8 @@ def test_memory_guard_llama_uses_model_size():
 if __name__ == "__main__":
     failures = 0
     for fn in (test_stale_container_cleared_before_run,
+               test_extra_mounts_emitted_before_image,
+               test_extra_mounts_accepts_string,
                test_graceful_keyboardinterrupt,
                test_toggle_syncs_opencode,
                test_wait_ready_ready_on_success,
