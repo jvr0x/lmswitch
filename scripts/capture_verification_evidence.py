@@ -57,13 +57,14 @@ def write_log(name: str, content: str) -> None:
 def step_install():
     """Install the package in editable mode and return the data root."""
     print("[1/5] Installing package (uv pip install -e .)")
-    out, rc = run([PYTHON, "-m", "pip", "install", "-e", str(WORKTREE)])
+    out, rc = run(["uv", "pip", "install", "-e", str(WORKTREE)])
     if rc != 0:
         print(f"  FAIL: {out[:500]}")
         sys.exit(1)
     print("  OK")
 
     # Build minimal tree using the fixture builder
+    sys.path.insert(0, str(WORKTREE))
     sys.path.insert(0, str(WORKTREE / "tests"))
     from tests.support.minimal_tree import build_minimal_tree
 
@@ -129,10 +130,10 @@ def step_cli(data_root: Path):
     write_log("cli-pym-list.log", out)
 
     # lmswitch init (non-interactive via echo)
-    out, _ = subprocess.run(
+    out, _ = run(
         [PYTHON, "-m", "lmswitch", "init"],
-        capture_output=True, text=True,
-        env={**os.environ, "LMSWITCH_DATA_DIR": str(data_root), "PYTHONDONTWRITEBYTECODE": "1"},
+        env={**os.environ, "LMSWITCH_DATA_DIR": str(data_root),
+             "PYTHONDONTWRITEBYTECODE": "1"},
         input="y\n/home/jvr0x/models\ny\ny\ny\n",
         timeout=30,
     )
@@ -150,7 +151,7 @@ def step_import():
     print("[3/5] Running import check (plan step 4)")
     cmd = [
         PYTHON, "-c",
-        f"import sys; sys.path.insert(0, {WORKTREE!r}); import lmswitch; print('PACKAGE IMPORT OK')",
+        f"import sys; sys.path.insert(0, {str(WORKTREE)!r}); import lmswitch; print('PACKAGE IMPORT OK')",
     ]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     content = r.stdout + r.stderr
@@ -207,8 +208,8 @@ def main():
     SCRATCH.mkdir(parents=True, exist_ok=True)
     print(f"Scratch dir: {SCRATCH}")
     print(f"Worktree: {WORKTREE}")
-    step_install()
-    data_root = step_cli(Path("/tmp"))  # step_cli doesn't actually use data_root param
+    data_root = step_install()
+    step_cli(data_root)
     step_import()
     step_pytest()
     step_main_status()
