@@ -1,17 +1,49 @@
 [project]
 name = "lmswitch"
 version = "1.2.0"
-description = "List and toggle local LLMs"
+description = "List, toggle, and serve local LLMs (GGUF via llama-server, vLLM via Docker) from simple YAML configs, with auto-sync to opencode/hermes/grok."
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Javier", email = "jvr0x@proton.me" },
+]
+keywords = [
+    "llm",
+    "local-llm",
+    "llama-cpp",
+    "llama-server",
+    "vllm",
+    "gguf",
+    "model-switcher",
+    "inference",
+    "opencode",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Utilities",
+]
 dependencies = [
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jvr0x/lmswitch"
+Repository = "https://github.com/jvr0x/lmswitch"
+Issues = "https://github.com/jvr0x/lmswitch/issues"
 
 [project.scripts]
 lmswitch = "lmswitch.cli:main"
 
 [build-system]
-requires = ["setuptools>=68.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
