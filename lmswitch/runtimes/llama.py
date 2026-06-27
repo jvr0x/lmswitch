@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -133,7 +134,7 @@ class LlamaRuntime(BaseRuntime):
             return False
 
 
-def stop_llama_by_pid(name: str) -> None:
+def stop_llama_by_pid(name: str, port: int | None = None) -> None:
     """Pure stop function: read PID file and kill process directly.
 
     Tries killing by PID from file first, then falls back to killing by port
@@ -141,8 +142,11 @@ def stop_llama_by_pid(name: str) -> None:
 
     Args:
         name: Model name (used for PID file path and messages).
+        port: Optional pre-read port from config. If omitted, the function
+              reads the YAML to obtain the port for fallback kill.
     """
     from lmswitch.system.io import RUN_DIR, CONF_DIR, _load_yaml
+    from lmswitch.system.checks import _listening_ports
     pid_file = RUN_DIR / name
 
     # Try killing by PID from file first
@@ -151,7 +155,7 @@ def stop_llama_by_pid(name: str) -> None:
             pid = int(pid_file.read_text().strip())
             os.kill(pid, 0)
             print(f"Stopping llama-server {name} (PID {pid})...")
-            os.kill(pid, 15)
+            _escalate_kill(pid, "llama-server")
             pid_file.unlink()
             return
         except (ProcessLookupError, ValueError, OSError):
@@ -159,46 +163,75 @@ def stop_llama_by_pid(name: str) -> None:
             pid_file.unlink(missing_ok=True)
 
     # Fallback: find process by port and kill it
-    yaml_path = CONF_DIR / f"{name}.yaml"
-    if yaml_path.exists():
-        try:
-            yaml_cfg = _load_yaml(yaml_path)
-            port = int(yaml_cfg.get("port", 0))
-        except (ValueError, TypeError):
-            port = 0
+    if port is None:
+        yaml_path = CONF_DIR / f"{name}.yaml"
+        if yaml_path.exists():
+            try:
+                yaml_cfg = _load_yaml(yaml_path)
+                port = int(yaml_cfg.get("port", 0))
+            except (ValueError, TypeError):
+                port = 0
 
-        if port:
-            from lmswitch.system.checks import _listening_ports
-            if port in _listening_ports():
-                print(f"Stopping llama-server {name} (port {port})...")
-                # Use ss to find PIDs listening on the port
-                try:
-                    import subprocess
-                    out = subprocess.check_output(
-                        ["ss", "-tlnpH"], text=True, stderr=subprocess.DEVNULL
-                    )
-                    for line in out.splitlines():
-                        if f":{port}" in line:
-                            # Extract PID from ss output (format: "users:((""pid""...))")
-                            import re
-                            m = re.search(r'pid=(\d+)', line)
-                            if m:
-                                try:
-                                    kill_pid = int(m.group(1))
-                                    os.kill(kill_pid, 15)
-                                    print(f"  ↓ {name} stopped (PID {kill_pid})")
-                                    return
-                                except (ProcessLookupError, OSError):
-                                    pass
-                except Exception:
-                    pass
-                # Fallback: killall by name
-                import subprocess as sp
-                sp.run(["pkill", "-f", f".*{name}.*"], check=False)
+    if port:
+        if port in _listening_ports():
+            print(f"Stopping llama-server {name} (port {port})...")
+            # Use ss to find PIDs listening on the port
+            try:
+                out = subprocess.check_output(
+                    ["ss", "-tlnpH"], text=True, stderr=subprocess.DEVNULL
+                )
+                for line in out.splitlines():
+                    if f":{port}" in line:
+                        # Extract PID from ss output (format: "users:((""pid""...))")
+                        m = re.search(r'pid=(\d+)', line)
+                        if m:
+                            try:
+                                kill_pid = int(m.group(1))
+                                _escalate_kill(kill_pid, "llama-server")
+                                print(f"  ↓ {name} stopped (PID {kill_pid})")
+                                pid_file.unlink(missing_ok=True)
+                                return
+                            except (ProcessLookupError, OSError):
+                                pass
+            except Exception:
+                pass
+            # Fallback: kill by name — be specific to avoid killing unrelated
+            # processes (e.g. "qwen3" should not match "qwen2.5").
+            try:
+                subprocess.run(
+                    ["pkill", "-f", rf"llama-server.*{name}"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
                 print(f"  ↓ {name} stopped (port {port})")
+                pid_file.unlink(missing_ok=True)
                 return
+            except Exception:
+                pass
 
     print(f"{name} not running")
+
+
+def _escalate_kill(pid: int, desc: str) -> None:
+    """Send SIGTERM, wait, then SIGKILL if the process is still alive."""
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        return
+    # Wait up to 5 seconds for graceful shutdown
+    for _ in range(10):
+        time.sleep(0.5)
+        try:
+            os.kill(pid, 0)  # still alive?
+        except ProcessLookupError:
+            return
+    # Process still alive — SIGKILL
+    try:
+        os.kill(pid, 9)
+        print(f"  ↓ {desc} (PID {pid}) killed with SIGKILL")
+    except ProcessLookupError:
+        pass
 
 
 # Keep module-level functions for backward compat

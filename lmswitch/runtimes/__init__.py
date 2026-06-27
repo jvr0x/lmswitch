@@ -79,5 +79,11 @@ def start_model(name: str, yaml: dict) -> None:
 
 def stop_model(name: str, runtime: str) -> None:
     """Stop a model server by runtime type."""
+    # Load the model's YAML config so stop() has access to model-specific
+    # settings (port, force, etc.) — callers should pass the runtime name.
+    yaml = {}
+    yaml_path = CONF_DIR / f"{name}.yaml"
+    if yaml_path.exists():
+        yaml = _load_yaml(yaml_path) or {}
     runtime_cls = runtime_registry.lookup(runtime)
-    runtime_cls().stop(name, {})
+    runtime_cls().stop(name, yaml)
