@@ -56,6 +56,13 @@ def write_log(name: str, content: str) -> None:
 
 def step_install():
     """Install the package in editable mode and return the data root."""
+    # Clean any stale egg-info that might pollute the parent (primary checkout)
+    # directory. This prevents `pip install -e .` from overwriting the primary
+    # checkout's entry points (the worktree and primary share the same parent).
+    egg_info = WORKTREE / "lmswitch.egg-info"
+    if egg_info.exists():
+        shutil.rmtree(egg_info)
+
     print("[1/5] Installing package (uv pip install -e .)")
     out, rc = run(["uv", "pip", "install", "-e", str(WORKTREE)])
     if rc != 0:
