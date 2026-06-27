@@ -109,7 +109,7 @@ must be mounted in (the model dir and `~/.cache/huggingface` are).
   `qwen`/`qwopus` → Qwen, `gemma`/`diffusiongemma` → Gemma, `deepseek`,
   `nemotron`, `kimi`, `gpt`/`gpt-oss`, `glm`, `nex`, `step`, `ornith`.
   An id matching none lands under **"Other"** — to add a new family, append a
-  rule to `FAMILY_RULES` in the `lmswitch` script.
+  rule to `FAMILY_RULES` in [`lmswitch.system.io`](lmswitch/system/io.py).
 - **GB10 GGUF optimization:** add `extra_args: ["-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"]`
   — flash-attention plus q8_0 KV cache, which slashes KV memory at long ctx.
   (Quantized KV **requires** flash-attn on, so set both together.)

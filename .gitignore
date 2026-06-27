@@ -3,3 +3,5 @@ ai-models/
 *.pyc
 ._*
 .venv/
+lmswitch.egg-info/
+running/

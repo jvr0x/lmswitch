@@ -1,40 +1,25 @@
-"""Reproducing tests for vLLM start robustness, graceful abort, and TUI sync.
-
-Bugs reproduced (all currently FAIL):
-  1. A stale/exited `vllm-<name>` container blocks `docker run` with a name
-     conflict, because detection only checks running containers. The start path
-     must clear a stale container before `docker run`.
-  2. Ctrl-C during a toggle dumps a traceback instead of aborting cleanly.
-  3. The interactive TUI toggle never refreshes opencode.json, so a model can
-     show as running while opencode doesn't list it.
+"""Tests for vLLM start robustness, graceful abort, and TUI sync.
 
 All subprocess interaction is stubbed; nothing is launched. Runs anywhere.
 """
 
-import importlib.util
+import sys
 import tempfile
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
+from unittest import mock
 
-_LMS = Path(__file__).resolve().parent.parent / "lmswitch"
-
-
-def _load():
-    loader = SourceFileLoader("lmswitch_mod", str(_LMS))
-    spec = importlib.util.spec_from_loader("lmswitch_mod", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    return mod
+import lmswitch.runtimes.vllm as vllm_mod
+import lmswitch.runtimes as runtime_mod
+import lmswitch.cli as cli_mod
+from lmswitch.system import checks as checks_mod
 
 
-class _Result:
-    def __init__(self, returncode=0):
-        self.returncode = returncode
+def _Result(returncode=0):
+    return type("Result", (), {"returncode": returncode})()
 
 
 def test_stale_container_cleared_before_run():
     """A docker rm for the model's container must precede docker run."""
-    mod = _load()
     calls = []
     state = {"ran": False}
 
@@ -45,120 +30,116 @@ def test_stale_container_cleared_before_run():
             state["ran"] = True
         return _Result(0)
 
-    def fake_check_output(cmd, *a, **k):
-        cl = list(cmd)
-        calls.append(cl)
-        if "ps" in cl:
-            if "-a" in cl:                       # stale-container probe
-                return "stale123\n" if not state["ran"] else ""
-            return "run123\n" if state["ran"] else ""   # running only after run
-        return ""
-
-    mod.subprocess.run = fake_run
-    mod.subprocess.check_output = fake_check_output
-    mod.time.sleep = lambda *a, **k: None
-
     yaml = {"runtime": "vllm", "model": "nvidia/qwen3.6-35b-a3b-nvfp4",
-            "port": 8114, "ctx": 32768, "gpu_memory_utilization": 0.55}
-    mod._start_vllm_direct("qwen3.6-35b-nvfp4-nvidia", yaml)
+            "port": 8114, "ctx": 32768, "gpu_memory_utilization": 0.55,
+            "_models_dir": Path(tempfile.mkdtemp())}
+
+    with mock.patch.object(vllm_mod.subprocess, "run", fake_run), \
+         mock.patch.object(vllm_mod.time, "sleep"), \
+         mock.patch.object(checks_mod, "_docker_container", return_value=None):
+        vllm_mod._start_vllm_direct("qwen3.6-35b-nvfp4-nvidia", yaml)
 
     run_idx = next((i for i, c in enumerate(calls) if c[:2] == ["docker", "run"]), None)
     rm_idx = next((i for i, c in enumerate(calls) if c[:2] == ["docker", "rm"]), None)
     assert run_idx is not None, f"expected a docker run; calls={calls}"
-    assert rm_idx is not None, f"expected a docker rm to clear a stale container; calls={calls}"
-    assert rm_idx < run_idx, "docker rm must run before docker run to avoid a name conflict"
+    assert rm_idx is not None, f"expected a docker rm; calls={calls}"
+    assert rm_idx < run_idx, "docker rm must run before docker run"
 
 
 def test_graceful_keyboardinterrupt():
     """Ctrl-C anywhere under main() must exit cleanly, not raise."""
-    mod = _load()
-
     def boom():
         raise KeyboardInterrupt()
 
-    mod.cmd_list = boom
-    mod.sys.argv = ["lmswitch", "list"]
+    cli_mod.cmd_list = boom
+    old_argv = sys.argv
+    sys.argv = ["lmswitch", "list"]
     try:
-        mod.main()
+        cli_mod.main()
     except KeyboardInterrupt:
-        raise AssertionError("Ctrl-C must be handled gracefully, not propagate KeyboardInterrupt")
+        raise AssertionError("Ctrl-C must be handled gracefully")
     except SystemExit:
-        pass  # graceful exit is acceptable
+        pass
+    finally:
+        sys.argv = old_argv
 
 
 def test_toggle_syncs_opencode():
     """The interactive TUI toggle must refresh opencode.json."""
-    mod = _load()
     called = {"regen": 0}
-    mod.regen_opencode = lambda: called.__setitem__("regen", called["regen"] + 1)
-    mod.start_model = lambda name, y: None
-    mod._resolve = lambda t: t
-    mod._load_yaml = lambda p: {"runtime": "llama", "port": 8085}
-    mod.time.sleep = lambda *a, **k: None
+    cli_mod._resolve = lambda t: t
+    cli_mod.time.sleep = lambda *a, **k: None
 
-    mod.toggle("qwen3-4b", "on")
-    assert called["regen"] >= 1, "TUI toggle must sync opencode (call regen_opencode)"
+    # Create a temp model dir with the yaml file, mock CONF_DIR and _load_yaml in cli
+    tmp = tempfile.mkdtemp()
+    yaml_path = Path(tmp) / "qwen3-4b.yaml"
+    yaml_path.write_text("runtime: llama\nport: 8085\n")
+
+    with mock.patch("lmswitch.system.io.CONF_DIR", Path(tmp)), \
+         mock.patch.object(cli_mod, "_load_yaml", return_value={"runtime": "llama", "port": 8085}), \
+         mock.patch.object(cli_mod, "start_model"), \
+         mock.patch("lmswitch.sync.regen_opencode", lambda: called.__setitem__("regen", called["regen"] + 1)):
+        cli_mod.toggle("qwen3-4b", "on")
+    assert called["regen"] >= 1, "TUI toggle must sync opencode"
 
 
 def test_wait_ready_ready_on_success():
     """A 200 from the port (curl returncode 0) yields 'ready'."""
-    mod = _load()
-    mod.subprocess.run = lambda *a, **k: _Result(0)
-    mod.time.sleep = lambda *a, **k: None
-    assert mod._wait_ready("m", 8085, 10, lambda: True) == "ready"
+    with mock.patch.object(vllm_mod.subprocess, "run", return_value=_Result(0)), \
+         mock.patch.object(vllm_mod.time, "sleep"):
+        from lmswitch.runtimes.wait import _wait_ready
+        assert _wait_ready("m", 8085, 10, lambda: True) == "ready"
 
 
 def test_wait_ready_dead_when_backend_exits():
-    """If the backend is not alive, readiness reports 'dead' without polling."""
-    mod = _load()
-    mod.time.sleep = lambda *a, **k: None
-    assert mod._wait_ready("m", 8085, 10, lambda: False) == "dead"
+    """If the backend is not alive, readiness reports 'dead'."""
+    with mock.patch.object(vllm_mod.time, "sleep"):
+        from lmswitch.runtimes.wait import _wait_ready
+        assert _wait_ready("m", 8085, 10, lambda: False) == "dead"
 
 
-def _guarded_start(mod, ram, yaml):
-    """Runs start_model with _ram_line/launchers stubbed; returns whether it launched."""
+def _guarded_start(ram, yaml):
+    """Runs start_model with _ram_line/launchers stubbed."""
     started = {"on": False}
-    mod._ram_line = lambda: ram
-    mod._start_vllm_direct = lambda n, y: started.__setitem__("on", True)
-    mod._start_llama_direct = lambda n, y: started.__setitem__("on", True)
-    mod._start_systemd = lambda n, y, r: started.__setitem__("on", True)
-    mod.start_model("m", yaml)
+    def _capture(*a, **k):
+        started["on"] = True
+    with mock.patch("lmswitch.system.memory._ram_line", return_value=ram), \
+         mock.patch("lmswitch.runtimes.vllm.VLLMRuntime.start", _capture), \
+         mock.patch("lmswitch.runtimes.llama.LlamaRuntime.start", _capture), \
+         mock.patch("lmswitch.runtimes.systemd._start_systemd", _capture):
+        runtime_mod.start_model("m", yaml)
     return started["on"]
 
 
 def test_memory_guard_refuses_insufficient_vllm():
     """A vLLM reservation larger than free RAM must be refused."""
-    mod = _load()
-    # 5Gi free; 0.55 * 121 ≈ 67Gi needed → refuse.
-    started = _guarded_start(mod, (121.0, 116.0, 5.0),
+    started = _guarded_start((121.0, 116.0, 5.0),
                              {"runtime": "vllm", "gpu_memory_utilization": 0.55})
-    assert started is False, "must refuse when the vLLM reservation exceeds free RAM"
+    assert started is False
 
 
 def test_memory_guard_allows_when_enough():
     """A model that fits in free RAM must start."""
-    mod = _load()
-    started = _guarded_start(mod, (121.0, 20.0, 95.0),
+    started = _guarded_start((121.0, 20.0, 95.0),
                              {"runtime": "vllm", "gpu_memory_utilization": 0.55})
-    assert started is True, "must start when free RAM covers the reservation"
+    assert started is True
 
 
 def test_memory_guard_force_overrides():
     """`force: true` bypasses the guard."""
-    mod = _load()
-    started = _guarded_start(mod, (121.0, 116.0, 5.0),
+    started = _guarded_start((121.0, 116.0, 5.0),
                              {"runtime": "vllm", "gpu_memory_utilization": 0.55, "force": True})
-    assert started is True, "force:true must override the RAM guard"
+    assert started is True
 
 
 def test_memory_guard_llama_uses_model_size():
     """GGUF footprint is estimated from the on-disk weight size."""
-    mod = _load()
-    mod._model_size_and_present = lambda rel, rt: (30 * 1024 ** 3, True)  # 30Gi weights
-    # 30Gi * 1.3 ≈ 39Gi needed, only 10Gi free → refuse.
-    started = _guarded_start(mod, (121.0, 111.0, 10.0),
-                             {"runtime": "llama", "model": "big.gguf"})
-    assert started is False, "must refuse a GGUF whose weights+headroom exceed free RAM"
+    # Patch _model_size_and_present where it's used (system/memory)
+    with mock.patch("lmswitch.system.memory._ram_line", return_value=(121.0, 111.0, 10.0)), \
+         mock.patch("lmswitch.system.memory._model_size_and_present", return_value=(30 * 1024 ** 3, True)):
+        from lmswitch.system.memory import _memory_check
+        ok, why = _memory_check("big", {"runtime": "llama", "model": "big.gguf"})
+        assert ok is False, "must refuse a GGUF whose weights+headroom exceed free RAM"
 
 
 if __name__ == "__main__":
