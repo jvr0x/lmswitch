@@ -72,7 +72,7 @@ systemd user units).
 
 | For | You need |
 |-----|----------|
-| lmswitch itself | Python 3.9+, `curl`, `ss` (iproute2). `pyyaml` is optional — a minimal built-in parser is used if it's absent. |
+| lmswitch itself | Python 3.10+, `curl`, `ss` (iproute2). `pyyaml` is installed automatically as a dependency (a minimal built-in parser is used as a fallback if it's ever missing). |
 | GGUF models | A built `llama.cpp` with `llama-server` (a CUDA build for GPU offload). Default binary path: `<lmswitch>/../llama.cpp/build/bin/llama-server` — override per-model with `llama_bin:`. |
 | vLLM models | Docker + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) (`--gpus all`). Pulls the `vllm/vllm-openai` image. |
 | `restart: on-failure` | A running systemd **user** instance (`systemctl --user`). |
@@ -80,18 +80,40 @@ systemd user units).
 
 ## Install
 
+lmswitch is a Python package exposing a `lmswitch` console-script entry point
+(`lmswitch = "lmswitch.cli:main"`). The cleanest install is as an isolated CLI
+tool with [uv](https://docs.astral.sh/uv/) (or pipx) — it keeps lmswitch's deps
+out of your system Python and sidesteps the `externally-managed-environment`
+(PEP 668) error on Debian/Ubuntu:
+
 ```bash
-# from the repo/worktree dir (e.g. ~/utils/lmswitch)
-pip install -e .
+# from the repo dir (e.g. ~/utils/lmswitch)
+uv tool install -e .        # editable; puts `lmswitch` on your PATH (~/.local/bin)
+uv tool update-shell        # one-time: ensure uv's bin dir is on $PATH
 lmswitch init
 ```
 
+<details>
+<summary>Other install methods</summary>
+
+```bash
+pipx install -e .                                  # same idea, via pipx
+pip install --user -e . --break-system-packages    # plain pip --user (overrides PEP 668)
+pip install -e .                                    # inside an activated virtualenv
+```
+</details>
+
 `init` asks where your models live (writes `ai-models/.lmswitch`), creates the
-`ai-models/` config dir, and installs a `lmswitch` console script entry point
-(`lmswitch = "lmswitch.cli:main"`) in your Python environment — `~/.local/bin/lmswitch`
-for editable installs. It also asks which sync targets to enable (opencode /
-hermes / grok — only the ones whose configs it finds). Ensure `~/.local/bin` is
-on your `$PATH`.
+`ai-models/` config dir, and asks which sync targets to enable (opencode / hermes
+/ grok — only the ones whose configs it finds). It does **not** reinstall the
+command: if a `lmswitch` console script is already on your `PATH` (from the step
+above) it leaves it alone; only if none is found does it drop a small launcher in
+`~/.local/bin` pinned to the current interpreter. Ensure `~/.local/bin` is on
+your `$PATH`.
+
+Upgrade after pulling changes with `uv tool upgrade lmswitch` (an editable
+install picks up code edits automatically); remove with `uv tool uninstall
+lmswitch`.
 
 ## Getting started
 
@@ -115,7 +137,9 @@ lmswitch off <name|#>     # stop a model
 lmswitch sync             # regenerate enabled configs from currently-serving models
 lmswitch add  <name>      # create a model config interactively
 lmswitch serve <name>     # run a model in the foreground (used by systemd)
-lmswitch init             # bootstrap ai-models/, .lmswitch, and the symlink
+lmswitch init             # bootstrap ai-models/, .lmswitch, and sync targets
+lmswitch -h, --help       # show help
+lmswitch -v, --version    # print the version
 ```
 
 In the interactive prompt you can toggle several at once, space/comma separated:
@@ -235,25 +259,50 @@ disk are touched; a target with no config is skipped). Each shapes its own file:
 Run `lmswitch sync` to regenerate on demand — handy after a detached load
 finishes.
 
-## Development & tests
+## Architecture
 
-The tests need `pytest` and `pyyaml`. Install the package in editable mode
-(`pip install -e .` from the worktree), then run the test suite:
+lmswitch is a small Python package with deliberate module boundaries. Runtimes
+are **pluggable**: adding a new backend (sglang, TGI, …) means writing one file
+that subclasses `BaseRuntime` and registering it — no changes to the CLI, sync,
+or loader code.
+
+```
+lmswitch/
+├── __main__.py          # `python -m lmswitch`
+├── cli.py               # arg parsing, table rendering, interactive TUI, commands
+├── sync.py              # opencode / hermes / grok config sync
+├── models/
+│   └── loader.py        # discover & parse ai-models/*.yaml → model dicts
+├── runtimes/            # how a model is started / stopped / probed
+│   ├── base.py          #   BaseRuntime ABC + RuntimeRegistry
+│   ├── llama.py         #   GGUF via llama-server (detached background process)
+│   ├── vllm.py          #   vLLM via Docker
+│   ├── systemd.py       #   restart: on-failure → systemd user unit
+│   └── wait.py          #   readiness polling
+└── system/
+    ├── io.py            # paths, constants (SPARK_HOST), YAML, family rules
+    ├── checks.py        # port / docker / process-state detection
+    └── memory.py        # /proc/meminfo + pre-load RAM guard
+```
+
+A toggle flows: `cli` resolves the name → `runtimes.start_model` runs the RAM
+guard (`system.memory`) and dispatches to the matching `BaseRuntime` →
+`runtimes.wait` polls until the endpoint answers → `sync` rewrites the enabled
+agent configs. All filesystem state lives under `ai-models/` (configs,
+`.lmswitch`, and `running/` PID files); the `LMSWITCH_DATA_DIR` env var overrides
+that root (used by the tests).
+
+## Development & tests
 
 ```bash
 cd ~/utils/lmswitch
 uv venv                            # create .venv from pyproject (Python >=3.10)
-uv pip install pytest pyyaml       # test deps (pyyaml is also a runtime dep)
-uv pip install -e .                # install the package itself
+uv pip install -e .                # the package (pulls in pyyaml)
+uv pip install pytest              # test runner
+uv run pytest -q                   # run the whole suite (57 tests)
 ```
 
-Run the whole suite (prefix with `uv run` so it uses the venv):
-
-```bash
-uv run pytest tests/ -q
-```
-
-Or run a single file / test:
+Run a single file / test:
 
 ```bash
 uv run pytest tests/test_sync.py -q
@@ -262,17 +311,15 @@ uv run pytest tests/test_sync.py::test_regen_hermes_keeps_running_default_sticky
 
 | File | Covers |
 |------|--------|
+| `tests/test_cli.py` | name/index resolution, rendering, command dispatch, `init` |
 | `tests/test_llama_cmd.py` | llama-server command construction |
 | `tests/test_vllm_and_abort.py` | vLLM start, readiness, RAM guard, Ctrl-C, opencode sync |
 | `tests/test_sync.py` | config sync to opencode / hermes / grok (selection, idempotency, round-trip) |
+| `tests/test_process_lifecycle.py` | start → detect-running → stop lifecycle |
 
 All tests are pure unit tests — `subprocess` / Docker / `curl` / ports are
-stubbed and configs are written to temp dirs, so they run anywhere (no GPU, no
-models, no Docker, and they never touch your real configs).
-
-> Without `uv` you can install the deps into any Python 3.10+ environment
-> (`pip install pytest pyyaml`) and run `pytest tests/`. The two older files also
-> run standalone (`python3 tests/test_llama_cmd.py`); `test_sync.py` needs pytest.
+stubbed and configs are written to temp dirs (via `LMSWITCH_DATA_DIR`), so they
+run anywhere (no GPU, no models, no Docker) and never touch your real configs.
 
 ## License
 
