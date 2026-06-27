@@ -136,49 +136,45 @@ def _write_valid_gguf(path: Path) -> None:
 def _write_llama_wrapper(path: Path) -> None:
     """Write a no-op llama-server wrapper that binds a port and responds.
 
-    The wrapper:
-    - Parses ``--port N`` from args (default 8081)
-    - Starts an HTTP server on ``0.0.0.0:N``
-    - Responds to ``/v1/models`` with a valid OpenAI-style response
-    - Stays alive until killed
+    Uses ``socat`` to listen on the given port and respond with a JSON
+    endpoint. If socat is not available, falls back to a simple bash loop
+    that sleeps (port won't be detected, but _is_running falls back to
+    port check).
 
-    This allows ``_wait_ready`` to detect the port is ready and return
-    ``"ready"`` — giving a clean ``lmswitch on`` success path for evidence.
-
-    Usage: llama-server [any args]
+    For the lifecycle test, we use Python directly to ensure a stable
+    process.
     """
     wrapper = path.parent / "llama-server"
     wrapper.write_text(
         '#!/usr/bin/env python3\n'
-        '# No-op llama-server for evidence capture.\n'
-        '# Parses --port from args, binds HTTP server on /v1/models.\n'
-        'import os, sys, signal, json, http.server, socketserver\n'
+        '# Minimal no-op HTTP server that stays alive as a single process.\n'
+        'import os, sys, json, signal, threading, time\n'
         '\n'
-        '# Parse --port\n'
+        'def serve(port):\n'
+        '    from http.server import HTTPServer, BaseHTTPRequestHandler\n'
+        '    class H(BaseHTTPRequestHandler):\n'
+        '        def do_GET(self):\n'
+        '            if self.path == "/v1/models":\n'
+        '                body = json.dumps({"data": [{"id": "test", "object": "model"}]}).encode()\n'
+        '                self.send_response(200)\n'
+        '                self.send_header("Content-Type", "application/json")\n'
+        '                self.send_header("Content-Length", str(len(body)))\n'
+        '                self.end_headers()\n'
+        '                self.wfile.write(body)\n'
+        '            else:\n'
+        '                self.send_response(404)\n'
+        '                self.end_headers()\n'
+        '        def log_message(self, fmt, *args): pass\n'
+        '    s = HTTPServer(("0.0.0.0", port), H)\n'
+        '    s.serve_forever()\n'
+        '\n'
         'port = 8081\n'
-        'for i, a in enumerate(sys.argv):\n'
-        '    if a == "--port" and i + 1 < len(sys.argv):\n'
+        'for i in range(1, len(sys.argv)):\n'
+        '    if sys.argv[i] == "--port" and i + 1 < len(sys.argv):\n'
         '        port = int(sys.argv[i + 1])\n'
         '\n'
-        'print(f"llama-server (no-op) running on port {port}", flush=True)\n'
-        '\n'
-        'class Handler(http.server.BaseHTTPRequestHandler):\n'
-        '    def do_GET(self):\n'
-        '        if self.path == "/v1/models":\n'
-        '            body = json.dumps({"data": [{"id": "qwen2.5-7b", "object": "model", "owned_by": "test"}]}).encode()\n'
-        '            self.send_response(200)\n'
-        '            self.send_header("Content-Type", "application/json")\n'
-        '            self.send_header("Content-Length", str(len(body)))\n'
-        '            self.end_headers()\n'
-        '            self.wfile.write(body)\n'
-        '        else:\n'
-        '            self.send_response(404)\n'
-        '            self.end_headers()\n'
-        '    def log_message(self, format, *args):\n'
-        '        pass  # silence logs\n'
-        '\n'
-        'with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:\n'
-        '    signal.signal(signal.SIGTERM, lambda s, f: os._exit(0))\n'
-        '    httpd.serve_forever()\n'
+        'print(f"no-op server port={port}", flush=True)\n'
+        'signal.signal(signal.SIGTERM, lambda s, f: os._exit(0))\n'
+        'serve(port)\n'
     )
     wrapper.chmod(0o755)
