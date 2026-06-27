@@ -2,7 +2,6 @@
 
 import json
 import re
-import sys
 from pathlib import Path
 
 from lmswitch.system.io import (
@@ -101,7 +100,8 @@ def regen_hermes() -> bool:
     by_name = {m["name"]: m for m in running}
 
     def _is_vision(m: dict) -> bool:
-        return "vl" in m["name"].lower()
+        name = m["name"].lower()
+        return "vision" in name or re.search(r"\bvl\b", name) is not None
 
     non_vision = [m for m in running if not _is_vision(m)]
     vision = [m for m in running if _is_vision(m)]
@@ -203,7 +203,8 @@ def regen_hermes() -> bool:
     payload = _yaml.safe_dump(
         cfg, default_flow_style=False, sort_keys=False, allow_unicode=True, width=4096
     )
-    if HERMES_CONFIG.read_text() == payload:
+    existing = HERMES_CONFIG.read_text() if HERMES_CONFIG.exists() else ""
+    if existing == payload:
         return False
     tmp = HERMES_CONFIG.with_suffix(".tmp")
     tmp.write_text(payload)

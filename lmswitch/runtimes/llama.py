@@ -199,7 +199,7 @@ def stop_llama_by_pid(name: str, port: int | None = None) -> None:
             # processes (e.g. "qwen3" should not match "qwen2.5").
             try:
                 subprocess.run(
-                    ["pkill", "-f", rf"llama-server.*{name}"],
+                    ["pkill", "-f", rf"llama-server.*{re.escape(name)}"],
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
