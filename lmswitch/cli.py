@@ -374,6 +374,7 @@ Usage:
   lmswitch add  <name>      create a new YAML config interactively
   lmswitch serve <name>     run a model in the foreground (for systemd)
   lmswitch -h, --help       show this help
+  lmswitch -v, --version    show the version
 """
 
 
@@ -385,6 +386,10 @@ def main() -> None:
             return
         if args[0] in ("-h", "--help"):
             print(_HELP)
+            return
+        if args[0] in ("-v", "--version"):
+            from lmswitch import __version__
+            print(f"lmswitch {__version__}")
             return
         if args[0] in ("list", "status", "ls"):
             cmd_list()
