@@ -83,6 +83,8 @@ gpu_memory_utilization: 0.55
 | `ready_timeout` | 600 | readiness wait |
 | `force` / `restart` | — | as above |
 | `extra_mounts` | — | extra docker `-v` bind mounts (vLLM only, see below) |
+| `env` | — | extra docker `-e` env vars; YAML mapping or `KEY=VALUE` list (vLLM only, see below) |
+| `entrypoint` | — | override container ENTRYPOINT; string or list (vLLM only, see below) |
 | `extra_args` | — | **any other `vllm serve` flag** |
 
 ## extra_mounts — mount extra paths into the container (vLLM only)
@@ -97,6 +99,30 @@ use `~` and `$VARS`. List or shell-split string, like `extra_args`:
 ```yaml
 extra_mounts: ["~/models/foo/drafter:/drafter:ro"]   # then reference /drafter in extra_args
 extra_mounts: "/data/cache:/cache:ro"
+```
+
+## env / entrypoint — for images that aren't the stock vLLM image (vLLM only)
+
+`extra_args` go to `vllm serve` *inside* the container, so they can't set docker
+`-e` env vars or change the container ENTRYPOINT. For images that need either —
+e.g. the AEON `ghcr.io/aeon-7/aeon-vllm-ultimate` build, whose ENTRYPOINT is
+`/bin/bash` (not `vllm serve`) and which needs GB10/NVFP4 env vars — use `env`
+and `entrypoint`. Both are emitted as `docker run` options **before** the image,
+so no custom/wrapper image is needed.
+
+```yaml
+# ENTRYPOINT override: docker --entrypoint takes only the binary, so a multi-token
+# value splits into `--entrypoint <bin>` + leading command tokens (before the
+# model path). `entrypoint: "vllm serve"` makes a /bin/bash-entrypoint image run
+# `vllm serve <model> <flags>` like the stock image does.
+entrypoint: "vllm serve"        # string (shell-split) or list ["vllm","serve"]
+
+# env: docker -e vars. Mapping (preferred) or KEY=VALUE list. Scalars are
+# stringified, so 1 / true need no quoting.
+env:
+  VLLM_TEST_FORCE_FP8_MARLIN: 1
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+env: ["VLLM_TEST_FORCE_FP8_MARLIN=1", "TORCH_CUDA_ARCH_LIST=12.1a"]
 ```
 
 Tip: a speculative-decoding drafter referenced by **HF id** doesn't need this —

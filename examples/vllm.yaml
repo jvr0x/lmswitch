@@ -16,7 +16,7 @@ gpu_memory_utilization: 0.55                   # --gpu-memory-utilization
 # reasoning_parser: "qwen3"                    # --reasoning-parser
 # reasoning_parser_plugin: "name"              # --reasoning-parser-plugin
 # trust_remote_code: true                      # --trust-remote-code
-# limit_mm_per_prompt: "image=4"               # --limit-mm-per-prompt
+# limit_mm_per_prompt: '{"image":4,"video":2}' # --limit-mm-per-prompt (JSON; vLLM 0.23 rejects the image=4 shorthand)
 # chat_template: "/path/template.jinja"        # --chat-template (ignored if no_chat_template set)
 # no_chat_template: true                       # skip passing --chat-template
 # attention_backend: "FLASHINFER"              # --attention-backend
@@ -47,5 +47,14 @@ gpu_memory_utilization: 0.55                   # --gpu-memory-utilization
 # container path). `host:container[:ro]`, host may use ~ and $VARS; list or
 # shell-split string.
 # extra_mounts: ["~/models/foo/drafter:/drafter:ro"]   # ref /drafter in extra_args
+#
+# env / entrypoint — for images that aren't the stock vLLM image. Both are docker
+# run options (emitted BEFORE the image), so no wrapper image is needed. Example:
+# the AEON image's ENTRYPOINT is /bin/bash (not `vllm serve`) and it needs
+# GB10/NVFP4 env vars — without these lmswitch would run `bash <model_dir>`.
+#   entrypoint: "vllm serve"                   # --entrypoint vllm + leading `serve` cmd token
+#   env:                                       # docker -e (mapping or KEY=VALUE list)
+#     VLLM_TEST_FORCE_FP8_MARLIN: 1
+#     TORCH_CUDA_ARCH_LIST: "12.1a"
 #
 # restart: on-failure                          # opt into systemd-managed auto-restart

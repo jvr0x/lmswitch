@@ -74,6 +74,57 @@ def test_extra_mounts_accepts_string():
     assert cmd[cmd.index("/data/foo:/foo:ro") - 1] == "-v"
 
 
+def test_entrypoint_splits_into_option_and_leading_cmd():
+    """entrypoint: 'vllm serve' -> --entrypoint vllm (before image) + `serve`
+    as the first command token (after the image, before the model path).
+    This is what lets the AEON image (ENTRYPOINT /bin/bash) work."""
+    md = Path(tempfile.mkdtemp())
+    yaml = {"runtime": "vllm", "model": "AEON-7/heretic", "port": 8120,
+            "image": "ghcr.io/aeon-7/aeon-vllm-ultimate:latest",
+            "entrypoint": "vllm serve", "_models_dir": md}
+    cmd = vllm_mod.VLLMRuntime()._build_cmd("m", yaml)
+    img_i = cmd.index("ghcr.io/aeon-7/aeon-vllm-ultimate:latest")
+    ep_i = cmd.index("--entrypoint")
+    assert cmd[ep_i + 1] == "vllm", "--entrypoint takes only the binary"
+    assert ep_i < img_i, "--entrypoint is a docker-run option, must precede the image"
+    assert cmd[img_i + 1] == "serve", "leftover entrypoint tokens lead the command"
+    assert cmd[img_i + 2] == str(md / "AEON-7/heretic"), "model path follows `serve`"
+
+
+def test_entrypoint_accepts_list():
+    """List form is equivalent to the shell-split string form."""
+    yaml = {"runtime": "vllm", "model": "m", "port": 8120, "image": "img:latest",
+            "entrypoint": ["vllm", "serve"], "_models_dir": Path(tempfile.mkdtemp())}
+    cmd = vllm_mod.VLLMRuntime()._build_cmd("m", yaml)
+    assert cmd[cmd.index("--entrypoint") + 1] == "vllm"
+    assert cmd[cmd.index("img:latest") + 1] == "serve", "`serve` leads the command"
+
+
+def test_env_emitted_as_docker_e_before_image():
+    """env mapping -> repeated `-e KEY=VALUE` docker options before the image,
+    with non-string scalars stringified."""
+    yaml = {"runtime": "vllm", "model": "m", "port": 8120,
+            "image": "img:latest",
+            "env": {"VLLM_TEST_FORCE_FP8_MARLIN": 1, "TORCH_CUDA_ARCH_LIST": "12.1a"},
+            "_models_dir": Path(tempfile.mkdtemp())}
+    cmd = vllm_mod.VLLMRuntime()._build_cmd("m", yaml)
+    img_i = cmd.index("img:latest")
+    for kv in ("VLLM_TEST_FORCE_FP8_MARLIN=1", "TORCH_CUDA_ARCH_LIST=12.1a"):
+        assert kv in cmd, f"{kv} missing"
+        i = cmd.index(kv)
+        assert cmd[i - 1] == "-e", f"{kv} must be a -e option"
+        assert i < img_i, f"{kv} must precede the image"
+
+
+def test_env_accepts_list_of_kv_strings():
+    """env as a list of KEY=VALUE strings works like the mapping form."""
+    yaml = {"runtime": "vllm", "model": "m", "port": 8120,
+            "env": ["FOO=bar"], "_models_dir": Path(tempfile.mkdtemp())}
+    cmd = vllm_mod.VLLMRuntime()._build_cmd("m", yaml)
+    assert "FOO=bar" in cmd
+    assert cmd[cmd.index("FOO=bar") - 1] == "-e"
+
+
 def test_graceful_keyboardinterrupt():
     """Ctrl-C anywhere under main() must exit cleanly, not raise."""
     def boom():
@@ -175,6 +226,10 @@ if __name__ == "__main__":
     for fn in (test_stale_container_cleared_before_run,
                test_extra_mounts_emitted_before_image,
                test_extra_mounts_accepts_string,
+               test_entrypoint_splits_into_option_and_leading_cmd,
+               test_entrypoint_accepts_list,
+               test_env_emitted_as_docker_e_before_image,
+               test_env_accepts_list_of_kv_strings,
                test_graceful_keyboardinterrupt,
                test_toggle_syncs_opencode,
                test_wait_ready_ready_on_success,

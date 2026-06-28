@@ -36,6 +36,48 @@ def _extra_mounts(yaml: dict) -> list[str]:
     return args
 
 
+def _env_args(yaml: dict) -> list[str]:
+    """Extra docker `-e` environment variables for the vLLM container.
+
+    `docker run` options, so emitted BEFORE the image. Accepts a YAML mapping
+    (preferred) or a list of `KEY=VALUE` strings. Values are stringified so
+    YAML scalars like `1` / `true` work without quoting:
+
+        env:
+          VLLM_TEST_FORCE_FP8_MARLIN: 1
+          TORCH_CUDA_ARCH_LIST: 12.1a
+        env: ["VLLM_TEST_FORCE_FP8_MARLIN=1", "TORCH_CUDA_ARCH_LIST=12.1a"]
+    """
+    raw = yaml.get("env") or {}
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    else:
+        items = [str(x).partition("=")[::2] for x in raw]
+    args: list[str] = []
+    for key, val in items:
+        args += ["-e", f"{key}={val}"]
+    return args
+
+
+def _entrypoint(yaml: dict) -> tuple[list[str], list[str]]:
+    """Override the container ENTRYPOINT.
+
+    Returns (docker_opts, leading_cmd): docker's `--entrypoint` takes a single
+    executable, so a multi-token entrypoint (e.g. `vllm serve`) splits into the
+    `--entrypoint <bin>` option (before the image) plus leading command tokens
+    (after the image, before the model path). Needed for images whose ENTRYPOINT
+    is not `vllm serve` — e.g. the AEON image's ENTRYPOINT is `/bin/bash`, so set
+    `entrypoint: "vllm serve"`. Accepts a string (shell-split) or a YAML list.
+    """
+    ep = yaml.get("entrypoint")
+    if not ep:
+        return [], []
+    if isinstance(ep, str):
+        ep = shlex.split(ep)
+    ep = [str(x) for x in ep]
+    return ["--entrypoint", ep[0]], ep[1:]
+
+
 def _vllm_args(yaml: dict) -> list[str]:
     from lmswitch.runtimes.llama import _extra_args
     args: list[str] = []
@@ -83,6 +125,7 @@ class VLLMRuntime(BaseRuntime):
 
         vllm_args = _vllm_args(yaml)
         detach_flag = ["-d"] if detached else []
+        ep_opts, ep_cmd = _entrypoint(yaml)
 
         cmd = [
             "docker", "run", *detach_flag,
@@ -100,9 +143,12 @@ class VLLMRuntime(BaseRuntime):
         if wheels.exists():
             cmd += ["-v", f"{wheels}:/wheels:ro"]
         cmd += _extra_mounts(yaml)
+        cmd += _env_args(yaml)
+        cmd += ep_opts
 
         cmd += [
             image,
+            *ep_cmd,
             str(model_path),
             f"--served-model-name={name}",
             f"--port={port}",
@@ -188,6 +234,7 @@ def _start_vllm_foreground(name: str, yaml: dict) -> None:
     wheels = SCRIPT_DIR / "spark-vllm-docker" / "wheels"
 
     vllm_args = _vllm_args(yaml)
+    ep_opts, ep_cmd = _entrypoint(yaml)
 
     cmd = [
         "docker", "run", "--rm",
@@ -202,9 +249,12 @@ def _start_vllm_foreground(name: str, yaml: dict) -> None:
     if wheels.exists():
         cmd += ["-v", f"{wheels}:/wheels:ro"]
     cmd += _extra_mounts(yaml)
+    cmd += _env_args(yaml)
+    cmd += ep_opts
 
     cmd += [
         image,
+        *ep_cmd,
         str(model_path),
         f"--served-model-name={name}",
         f"--port={port}",
