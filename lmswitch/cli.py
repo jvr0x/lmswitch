@@ -29,6 +29,7 @@ from lmswitch.system.io import (
 )
 from lmswitch.system.checks import _listening_ports, _is_running
 from lmswitch.system import _get_sync_targets
+from lmswitch.system import usage as usage_mod
 from lmswitch.system.memory import _memory_check
 from lmswitch.models.loader import load_models
 from lmswitch.runtimes import (
@@ -349,6 +350,135 @@ def cmd_add(name: str) -> None:
         sys.exit(1)
 
 
+def _human_sec(seconds: float) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.1f}m"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f}h"
+    days = hours / 24
+    return f"{days:.1f}d"
+
+
+def _human_bytes(n: int) -> str:
+    """Format bytes into human-readable size."""
+    if n == 0:
+        return "-"
+    gb = n / 1024 ** 3
+    if gb >= 1000:
+        return f"{gb / 1024:.1f}T"
+    return f"{gb:.1f}G"
+
+
+def cmd_stats() -> None:
+    """Display usage statistics from the JSONL events file."""
+    from datetime import datetime as _dt
+
+    events = usage_mod.query_events()
+    if not events:
+        print("No usage events recorded yet.")
+        return
+
+    total_starts = 0
+    total_stops = 0
+    by_model: dict[str, dict] = {}
+    by_runtime: dict[str, int] = {}
+    start_times: dict[str, float] = {}
+
+    for ev in events:
+        action = ev.get("action", "")
+        model = ev.get("model", "unknown")
+        runtime = ev.get("runtime", "unknown")
+        ts_str = ev.get("ts", "")
+        try:
+            ts = _dt.fromisoformat(ts_str).timestamp()
+        except (ValueError, TypeError):
+            ts = 0.0
+        duration = float(ev.get("duration", 0) or 0)
+        size = int(ev.get("size", 0) or 0)
+
+        if action == "start":
+            total_starts += 1
+            start_times[model] = ts
+            if model not in by_model:
+                by_model[model] = {"starts": 0, "stops": 0, "total_duration": 0.0, "total_size": 0}
+            by_model[model]["starts"] += 1
+            by_model[model]["total_size"] += size
+        elif action == "stop":
+            total_stops += 1
+            total_duration = duration
+            if model not in by_model:
+                by_model[model] = {"starts": 0, "stops": 0, "total_duration": 0.0, "total_size": 0}
+            by_model[model]["stops"] += 1
+            by_model[model]["total_duration"] += total_duration
+            by_model[model]["total_size"] += size
+
+        if runtime:
+            by_runtime[runtime] = by_runtime.get(runtime, 0) + 1
+
+    total_duration = sum(m.get("total_duration", 0) for m in by_model.values())
+    total_tokens = sum(m.get("total_size", 0) for m in by_model.values())
+
+    print()
+    print(_c("  ⬡  Usage Statistics", "1"))
+    print()
+    print(f"  Total starts:       {total_starts}")
+    print(f"  Total stops:        {total_stops}")
+    print(f"  Total uptime:       {_human_sec(total_duration)}")
+    print(f"  Total weight size:  {_human_bytes(total_tokens)}")
+    print(f"  Models tracked:     {len(by_model)}")
+    print()
+
+    if by_model:
+        print(_c("  Model breakdown", "1"))
+        print()
+        for model in sorted(by_model):
+            info = by_model[model]
+            starts = info["starts"]
+            stops = info["stops"]
+            dur = info["total_duration"]
+            sz = info["total_size"]
+            display = model
+            for ev in events:
+                if ev.get("model") == model and ev.get("action") == "start":
+                    display = ev.get("display_name", model)
+                    break
+            print(f"  {_c(_c('●', '32') if starts > 0 else _c('○', '2'), '1')} {display}")
+            print(f"      starts: {starts}  stops: {stops}")
+            print(f"      uptime: {_human_sec(dur)}  weights: {_human_bytes(sz)}")
+        print()
+
+    if by_runtime:
+        print(_c("  By runtime", "1"))
+        print()
+        for rt in sorted(by_runtime):
+            print(f"  {rt:<12} {by_runtime[rt]} events")
+        print()
+
+    print(_c("  Latest events", "1"))
+    print()
+    recent = events[-10:] if len(events) > 10 else events
+    for ev in recent:
+        ts = ev.get("ts", "")
+        action = ev.get("action", "?")
+        model = ev.get("model", "?")
+        runtime = ev.get("runtime", "?")
+        display = ev.get("display_name", model)
+        dot = _c("●", "32") if action == "start" else _c("○", "2")
+        print(f"  {dot} {action:>6}  {display:<20}  {runtime}  {ts}")
+    print()
+
+
+def cmd_stats_clear() -> None:
+    """Clear all usage statistics."""
+    usage_mod.clear_events()
+    print("Usage statistics cleared.")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -373,6 +503,8 @@ Usage:
   lmswitch init             bootstrap ai-models/ dir, config, symlink, and sync targets
   lmswitch add  <name>      create a new YAML config interactively
   lmswitch serve <name>     run a model in the foreground (for systemd)
+  lmswitch stats            show usage statistics (starts, stops, uptime, per-model)
+  lmswitch stats-clear      clear all usage statistics
   lmswitch -h, --help       show this help
   lmswitch -v, --version    show the version
 """
@@ -405,6 +537,10 @@ def main() -> None:
             cmd_add(args[1])
         elif args[0] == "serve" and len(args) == 2:
             cmd_serve(args[1])
+        elif args[0] == "stats":
+            cmd_stats()
+        elif args[0] == "stats-clear":
+            cmd_stats_clear()
         else:
             sys.exit(_HELP)
     except KeyboardInterrupt:
@@ -438,12 +574,15 @@ def show() -> None:
             return
         if choice.lower() in ("q", "quit", "exit", ""):
             return
+        if choice.lower() == "stats":
+            cmd_stats()
+            continue
         if not models:
             print("  (no models to toggle — use `lmswitch add <name>` first)\n")
             continue
         nums = [int(t) for t in re.split(r"[^0-9]+", choice) if t]
         if not nums or any(not (1 <= n <= len(models)) for n in nums):
-            print(f"  ? enter 1-{len(models)} (one or more, e.g. 8 9 24) or q\n")
+            print(f"  ? enter 1-{len(models)} (one or more, e.g. 8 9 24), or 'stats' (or q)\n")
             continue
         for n in nums:
             m = models[n - 1]

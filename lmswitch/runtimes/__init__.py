@@ -27,6 +27,7 @@ from lmswitch.system.io import (
 )
 from lmswitch.system.checks import _docker_container, _is_running, _listening_ports
 from lmswitch.system.memory import _memory_check
+from lmswitch.system import usage as usage_mod
 from lmswitch.runtimes.base import BaseRuntime, RunningState, runtime_registry
 from lmswitch.runtimes.llama import LlamaRuntime, _extra_args, _start_llama_direct
 from lmswitch.runtimes.vllm import VLLMRuntime, _vllm_args, _start_vllm_direct, _start_vllm_foreground
@@ -72,9 +73,11 @@ def start_model(name: str, yaml: dict) -> None:
     restart = yaml.get("restart")
     if restart:
         _start_systemd(name, yaml, restart)
+        usage_mod.record_start(name, yaml)
         return
     runtime_cls = runtime_registry.lookup(runtime_name)
     runtime_cls().start(name, yaml)
+    usage_mod.record_start(name, yaml)
 
 
 def stop_model(name: str, runtime: str) -> None:
@@ -87,3 +90,4 @@ def stop_model(name: str, runtime: str) -> None:
         yaml = _load_yaml(yaml_path) or {}
     runtime_cls = runtime_registry.lookup(runtime)
     runtime_cls().stop(name, yaml)
+    usage_mod.record_stop(name, 0.0)

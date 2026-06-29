@@ -36,6 +36,7 @@ from lmswitch.system.memory import (
     _ram_line,
     _memory_check,
 )
+from lmswitch.system import usage as usage
 
 __all__ = [
     "TTY",
@@ -68,4 +69,5 @@ __all__ = [
     "_is_running",
     "_ram_line",
     "_memory_check",
+    "usage",
 ]
