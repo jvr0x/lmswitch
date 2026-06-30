@@ -13,6 +13,9 @@ Each event has:
     - ``ctx``: context length
     - ``size``: weight file size in bytes
     - ``duration``: seconds (only on ``stop``, 0 on ``start``)
+    - ``prompt_tokens``: tokens consumed from prompt (only on ``stop``)
+    - ``generation_tokens``: tokens generated (only on ``stop``)
+    - ``total_tokens``: prompt_tokens + generation_tokens
     - ``config``: the full model YAML dict (on ``start``)
 
 Events are appended to a single file.  Reading queries returns all events
@@ -101,15 +104,42 @@ def record_start(
     record_event(event)
 
 
+def _fetch_stats_from_port(port: int) -> dict[str, int]:
+    """Query the /stats endpoint of a serving model for token counts.
+
+    Both llama.cpp and vLLM expose a JSON ``/stats`` endpoint with
+    ``prompt_tokens`` / ``generation_tokens`` keys.  Falls back to empty
+    dict on any failure so we never block the stop path.
+    """
+    try:
+        import urllib.request
+        url = f"http://127.0.0.1:{port}/stats"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+        return {
+            "prompt_tokens": int(data.get("prompt_tokens", 0)),
+            "generation_tokens": int(data.get("generation_tokens", 0)),
+        }
+    except Exception:
+        return {}
+
+
 def record_stop(
     name: str,
     duration_sec: float,
+    prompt_tokens: int = 0,
+    generation_tokens: int = 0,
+    port: int = 0,
 ) -> None:
     """Record a model stop event.
 
     Args:
         name: Model name.
         duration_sec: Approximate uptime in seconds.
+        prompt_tokens: Tokens consumed from prompt (optional, default 0).
+        generation_tokens: Tokens generated (optional, default 0).
+        port: Model port — used to query /stats if token counts are 0.
     """
     # O(1) in-memory lookup — no disk I/O
     model_event: dict[str, Any] | None = _START_CACHE.get(name)
@@ -123,9 +153,18 @@ def record_stop(
 
     display_name = model_event.get("display_name", name) if model_event else name
     runtime = model_event.get("runtime", "unknown") if model_event else "unknown"
-    port = model_event.get("port", 0) if model_event else 0
+    p = model_event.get("port", 0) if model_event else 0
     ctx = model_event.get("ctx", 65536) if model_event else 65536
     size = model_event.get("size", 0) if model_event else 0
+
+    # If explicit token counts are zero, try to fetch from the model's
+    # serving endpoint (llama.cpp / vLLM both expose /stats).
+    if prompt_tokens == 0 and generation_tokens == 0 and port > 0:
+        stats = _fetch_stats_from_port(port)
+        prompt_tokens = stats.get("prompt_tokens", 0)
+        generation_tokens = stats.get("generation_tokens", 0)
+
+    total_tokens = prompt_tokens + generation_tokens
 
     event: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -133,10 +172,13 @@ def record_stop(
         "model": name,
         "display_name": display_name,
         "runtime": runtime,
-        "port": port,
+        "port": p,
         "ctx": ctx,
         "size": size,
         "duration": duration_sec,
+        "prompt_tokens": prompt_tokens,
+        "generation_tokens": generation_tokens,
+        "total_tokens": total_tokens,
     }
     record_event(event)
 

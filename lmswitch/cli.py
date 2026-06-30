@@ -389,6 +389,11 @@ def cmd_stats() -> None:
     by_runtime: dict[str, int] = {}
     start_times: dict[str, float] = {}
 
+    # Track token counts
+    total_prompt_tokens = 0
+    total_gen_tokens = 0
+    total_all_tokens = 0
+
     for ev in events:
         action = ev.get("action", "")
         model = ev.get("model", "unknown")
@@ -400,76 +405,174 @@ def cmd_stats() -> None:
             ts = 0.0
         duration = float(ev.get("duration", 0) or 0)
         size = int(ev.get("size", 0) or 0)
+        prompt_tok = int(ev.get("prompt_tokens", 0) or 0)
+        gen_tok = int(ev.get("generation_tokens", 0) or 0)
+        total_tok = int(ev.get("total_tokens", 0) or 0)
 
         if action == "start":
             total_starts += 1
             start_times[model] = ts
             if model not in by_model:
-                by_model[model] = {"starts": 0, "stops": 0, "total_duration": 0.0, "total_size": 0}
+                by_model[model] = {
+                    "starts": 0, "stops": 0, "total_duration": 0.0,
+                    "total_size": 0, "total_prompt_tokens": 0,
+                    "total_gen_tokens": 0, "total_tokens": 0,
+                }
             by_model[model]["starts"] += 1
             by_model[model]["total_size"] += size
         elif action == "stop":
             total_stops += 1
-            total_duration = duration
+            total_prompt_tokens += prompt_tok
+            total_gen_tokens += gen_tok
+            total_all_tokens += total_tok
             if model not in by_model:
-                by_model[model] = {"starts": 0, "stops": 0, "total_duration": 0.0, "total_size": 0}
+                by_model[model] = {
+                    "starts": 0, "stops": 0, "total_duration": 0.0,
+                    "total_size": 0, "total_prompt_tokens": 0,
+                    "total_gen_tokens": 0, "total_tokens": 0,
+                }
             by_model[model]["stops"] += 1
-            by_model[model]["total_duration"] += total_duration
+            by_model[model]["total_duration"] += duration
             by_model[model]["total_size"] += size
+            by_model[model]["total_prompt_tokens"] += prompt_tok
+            by_model[model]["total_gen_tokens"] += gen_tok
+            by_model[model]["total_tokens"] += total_tok
 
         if runtime:
             by_runtime[runtime] = by_runtime.get(runtime, 0) + 1
 
     total_duration = sum(m.get("total_duration", 0) for m in by_model.values())
-    total_tokens = sum(m.get("total_size", 0) for m in by_model.values())
 
+    # ---- Display: TUI dashboard ----
+    _print_stats_dashboard(
+        total_starts, total_stops, total_duration, total_prompt_tokens,
+        total_gen_tokens, total_all_tokens, len(by_model), by_model,
+        by_runtime, events,
+    )
+
+
+def _bar(value: int, max_val: int, width: int = 20, color: str = "32") -> str:
+    """Render a simple ASCII bar chart segment."""
+    if max_val == 0:
+        return "─" * width
+    filled = round(value / max_val * width)
+    return _c("█" * filled, color) + "─" * (width - filled)
+
+
+def _format_tokens(n: int) -> str:
+    """Format token count with K/M suffix."""
+    if n == 0:
+        return "0"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _print_stats_dashboard(
+    total_starts: int,
+    total_stops: int,
+    total_duration: float,
+    total_prompt_tokens: int,
+    total_gen_tokens: int,
+    total_all_tokens: int,
+    model_count: int,
+    by_model: dict[str, dict],
+    by_runtime: dict[str, int],
+    events: list[dict],
+) -> None:
+    """Render the usage statistics dashboard."""
     print()
-    print(_c("  ⬡  Usage Statistics", "1"))
-    print()
-    print(f"  Total starts:       {total_starts}")
-    print(f"  Total stops:        {total_stops}")
-    print(f"  Total uptime:       {_human_sec(total_duration)}")
-    print(f"  Total weight size:  {_human_bytes(total_tokens)}")
-    print(f"  Models tracked:     {len(by_model)}")
+    print(_c("  Usage Statistics", "1"))
     print()
 
-    if by_model:
-        print(_c("  Model breakdown", "1"))
+    # Summary table
+    print(_c("  Summary", "1"))
+    print()
+    print(f"  {'Starts:':<15} {total_starts}")
+    print(f"  {'Stops:':<15} {total_stops}")
+    print(f"  {'Total uptime:':<15} {_human_sec(total_duration)}")
+    print(f"  {'Models tracked:':<15} {model_count}")
+    print()
+
+    # Token stats
+    if total_all_tokens > 0 or total_stops > 0:
+        print(_c("  Token Counts", "1"))
         print()
-        for model in sorted(by_model):
-            info = by_model[model]
-            starts = info["starts"]
-            stops = info["stops"]
-            dur = info["total_duration"]
-            sz = info["total_size"]
-            display = model
-            for ev in events:
-                if ev.get("model") == model and ev.get("action") == "start":
-                    display = ev.get("display_name", model)
-                    break
-            print(f"  {_c(_c('●', '32') if starts > 0 else _c('○', '2'), '1')} {display}")
-            print(f"      starts: {starts}  stops: {stops}")
-            print(f"      uptime: {_human_sec(dur)}  weights: {_human_bytes(sz)}")
+        print(f"  {'Prompt tokens:':<15} {_format_tokens(total_prompt_tokens)}")
+        print(f"  {'Generated tokens:':<15} {_format_tokens(total_gen_tokens)}")
+        print(f"  {'Total tokens:':<15} {_format_tokens(total_all_tokens)}")
         print()
 
+        # Per-model token bars (only if we have token data)
+        if by_model and any(
+            m.get("total_tokens", 0) > 0 for m in by_model.values()
+        ):
+            print(_c("  Token Breakdown", "1"))
+            print()
+
+            # Find max token count for bar scaling
+            max_tokens = max(
+                (m.get("total_tokens", 0) for m in by_model.values()),
+                default=1,
+            )
+            if max_tokens == 0:
+                max_tokens = 1
+
+            for model in sorted(by_model):
+                info = by_model[model]
+                tok = info.get("total_tokens", 0)
+                prompt_tok = info.get("total_prompt_tokens", 0)
+                gen_tok = info.get("total_gen_tokens", 0)
+                display = model
+                for ev in events:
+                    if ev.get("model") == model and ev.get("action") == "start":
+                        display = ev.get("display_name", model)
+                        break
+                dot = _c("●", "32") if info["starts"] > 0 else _c("○", "2")
+                bar_total = _bar(tok, max_tokens, width=25, color="32")
+                bar_prompt = _bar(prompt_tok, max_tokens, width=12, color="33")
+                bar_gen = _bar(gen_tok, max_tokens, width=12, color="34")
+                print(f"  {dot} {display}")
+                print(f"      total : {bar_total} {_format_tokens(tok)}")
+                print(f"      prompt: {bar_prompt} {_format_tokens(prompt_tok)}")
+                print(f"      gen   : {bar_gen} {_format_tokens(gen_tok)}")
+            print()
+
+    # Runtime breakdown with bars
     if by_runtime:
-        print(_c("  By runtime", "1"))
+        print(_c("  By Runtime", "1"))
         print()
+        max_events = max(by_runtime.values(), default=1)
         for rt in sorted(by_runtime):
-            print(f"  {rt:<12} {by_runtime[rt]} events")
+            count = by_runtime[rt]
+            bar = _bar(count, max_events, width=25, color="36")
+            print(f"  {rt:<12} {bar} {count} events")
         print()
 
-    print(_c("  Latest events", "1"))
+    # Latest events table
+    print(_c("  Latest Events", "1"))
     print()
-    recent = events[-10:] if len(events) > 10 else events
+    print(f"  {'ACTION':>6}  {'DISPLAY':<20}  {'RUNTIME':<8}  {'PROMPT':>8}  {'GEN':>8}  {'TOTAL':>8}  {'TIME'}")
+    recent = events[-15:] if len(events) > 15 else events
     for ev in recent:
         ts = ev.get("ts", "")
         action = ev.get("action", "?")
         model = ev.get("model", "?")
         runtime = ev.get("runtime", "?")
         display = ev.get("display_name", model)
+        prompt_tok = int(ev.get("prompt_tokens", 0) or 0)
+        gen_tok = int(ev.get("generation_tokens", 0) or 0)
+        total_tok = int(ev.get("total_tokens", 0) or 0)
         dot = _c("●", "32") if action == "start" else _c("○", "2")
-        print(f"  {dot} {action:>6}  {display:<20}  {runtime}  {ts}")
+        act_label = action.upper()[:6].rjust(6)
+        time_str = ts.split("T")[1][:8] if "T" in ts else ts
+        print(
+            f"  {dot} {act_label}  {display:<20}  {runtime:<8}  "
+            f"{_format_tokens(prompt_tok):>8}  {_format_tokens(gen_tok):>8}  "
+            f"{_format_tokens(total_tok):>8}  {time_str}"
+        )
     print()
 
 

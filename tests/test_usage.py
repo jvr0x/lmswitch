@@ -419,10 +419,10 @@ def test_cmd_stats_displays_summary():
             sys.stdout = old
         output = buf.getvalue()
         assert "Usage Statistics" in output
-        assert "Total starts:       1" in output
-        assert "Total stops:        1" in output
-        assert "Model breakdown" in output
-        assert "Latest events" in output
+        assert "Starts:         1" in output
+        assert "Stops:          1" in output
+        assert "Summary" in output
+        assert "Latest Events" in output
 
 
 def test_cmd_stats_empty():
@@ -520,8 +520,8 @@ def test_full_pipeline():
 
     output = buf.getvalue()
     # Check aggregate stats
-    assert "Total starts:       3" in output
-    assert "Total stops:        3" in output
+    assert "Starts:         3" in output
+    assert "Stops:          3" in output
     # Check per-model (output uses display_name, not raw model name)
     assert "Qwen3.6-35B" in output
     assert "Mistral-7B" in output
