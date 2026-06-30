@@ -32,6 +32,12 @@ from lmswitch.system.io import CONF_DIR
 
 USAGE_FILE = CONF_DIR / "lmswitch-usage.json"
 
+# In-memory cache of last start event per model — populated on record_start,
+# read on record_stop. Keeps stop() at O(1) regardless of file size.
+# Cleared on clear_events() and on any process restart (events are still
+# recoverable from the JSONL file, start just won't carry the cached config).
+_START_CACHE: dict[str, dict[str, Any]] = {}
+
 
 def _get_usage_file() -> Path:
     """Return the usage file path, ensuring parent dirs exist."""
@@ -90,6 +96,8 @@ def record_start(
         "duration": 0,
         "config": {k: v for k, v in yaml.items() if k != "config"},
     }
+    # Cache start event for O(1) lookup on record_stop
+    _START_CACHE[name] = event
     record_event(event)
 
 
@@ -103,21 +111,15 @@ def record_stop(
         name: Model name.
         duration_sec: Approximate uptime in seconds.
     """
-    # TODO (perf): This calls query_events() which reads the full file from disk
-    # to look up the prior start event. For typical usage (hundreds to ~10k events)
-    # this is fine. It becomes a problem if the file grows to ~100k+ events — at that
-    # point stop() will be slow (~50-200ms full file parse on every call), and
-    # frequent toggling will add up. Mitigation: replace with a small JSON index
-    # file (e.g. ``lmswitch-index.json``) keyed by ``{"model": <name>, "last_start": <event>}``
-    # that is maintained in-memory at module level or appended to on each start. The
-    # index can be read lazily on stop (one seek to the end) instead of scanning the
-    # entire log. For now, the simple approach keeps the implementation at ~200 lines.
-    events = query_events()
-    model_event = None
-    for ev in reversed(events):
-        if ev["model"] == name and ev["action"] == "start":
-            model_event = ev
-            break
+    # O(1) in-memory lookup — no disk I/O
+    model_event: dict[str, Any] | None = _START_CACHE.get(name)
+    if model_event is None:
+        # Process restart — fall back to scanning the file
+        events = query_events()
+        for ev in reversed(events):
+            if ev["model"] == name and ev["action"] == "start":
+                model_event = ev
+                break
 
     display_name = model_event.get("display_name", name) if model_event else name
     runtime = model_event.get("runtime", "unknown") if model_event else "unknown"
