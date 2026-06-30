@@ -103,7 +103,15 @@ def record_stop(
         name: Model name.
         duration_sec: Approximate uptime in seconds.
     """
-    # Look up previous start event to get config details
+    # TODO (perf): This calls query_events() which reads the full file from disk
+    # to look up the prior start event. For typical usage (hundreds to ~10k events)
+    # this is fine. It becomes a problem if the file grows to ~100k+ events — at that
+    # point stop() will be slow (~50-200ms full file parse on every call), and
+    # frequent toggling will add up. Mitigation: replace with a small JSON index
+    # file (e.g. ``lmswitch-index.json``) keyed by ``{"model": <name>, "last_start": <event>}``
+    # that is maintained in-memory at module level or appended to on each start. The
+    # index can be read lazily on stop (one seek to the end) instead of scanning the
+    # entire log. For now, the simple approach keeps the implementation at ~200 lines.
     events = query_events()
     model_event = None
     for ev in reversed(events):
