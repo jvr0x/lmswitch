@@ -1,0 +1,3 @@
+[submodule "ai-models"]
+	path = ai-models
+	url = https://github.com/jvr0x/ai-models.git

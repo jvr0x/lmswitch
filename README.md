@@ -78,6 +78,24 @@ systemd user units).
 | `restart: on-failure` | A running systemd **user** instance (`systemctl --user`). |
 | config sync | Any of [opencode](https://opencode.ai), [hermes](https://github.com/NousResearch/hermes-agent), [grok](https://github.com/xai-org/grok-cli) (all optional — only configs that exist are synced). |
 
+## Submodule
+
+This repo includes a git submodule (`ai-models/`) with community-contributed YAML
+recipes for GGUF and vLLM models. The submodule lives at
+[jvr0x/ai-models](https://github.com/jvr0x/ai-models).
+
+```bash
+# Clone with recipes baked in:
+git clone --recurse-submodules https://github.com/jvr0x/lmswitch.git
+
+# If you already cloned (without --recurse):
+cd lmswitch
+git submodule update --init
+```
+
+If you only need the recipes (no lmswitch code), clone the submodule repo
+directly: https://github.com/jvr0x/ai-models
+
 ## Install
 
 lmswitch is a Python package exposing a `lmswitch` console-script entry point
