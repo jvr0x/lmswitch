@@ -110,6 +110,12 @@ def _vllm_args(yaml: dict) -> list[str]:
 class VLLMRuntime(BaseRuntime):
     """vLLM model runtime using Docker."""
 
+    def _setup_logging(self, name: str) -> Path:
+        """Set up logging for the model — returns log file path."""
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        log_path = RUN_DIR / f"{name}.log"
+        return log_path
+
     def _build_cmd(self, name: str, yaml: dict, detached: bool = True) -> list[str]:
         """Build the docker run command for this model."""
         models_dir = yaml.get("_models_dir")
@@ -168,6 +174,10 @@ class VLLMRuntime(BaseRuntime):
             print(f"vLLM {name} already running (container {existing[:12]})")
             return RunningState("ready")
 
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        id_file = RUN_DIR / name
+        log_path = self._setup_logging(name)
+
         port = yaml.get("port", 0)
         print(f"Starting vLLM {name} on port {port}...")
         print(f"  Image: {yaml.get('image', 'vllm/vllm-openai:cu130-nightly')}")
@@ -187,7 +197,11 @@ class VLLMRuntime(BaseRuntime):
             timeout = 600
         status = _wait_ready(name, port, timeout, lambda: _docker_container(name) is not None)
         if status == "ready":
+            container_id = _docker_container(name)
+            id_file.write_text(container_id or name)
             print(f"  Ready on port {port}")
+            print(f"  PID file:  {id_file}")
+            print(f"  Log file:  {log_path}")
         elif status == "dead":
             print(f"  ✗ {name} container exited during startup — "
                   f"check: docker logs vllm-{name}")
@@ -198,17 +212,22 @@ class VLLMRuntime(BaseRuntime):
 
     def stop(self, name: str, yaml: dict) -> None:
         from lmswitch.system.checks import _docker_container
+        id_file = RUN_DIR / name
         cid = _docker_container(name)
         if cid:
             print(f"Stopping vLLM {name} (container {cid[:12]})...")
             subprocess.run(["docker", "stop", cid], check=False)
             subprocess.run(["docker", "rm", cid], check=False)
+            id_file.unlink(missing_ok=True)
         else:
             print(f"vLLM {name} not running")
 
     def is_running(self, name: str, runtime_name: str) -> bool:
         from lmswitch.system.checks import _docker_container
-        return _docker_container(name) is not None
+        cid = _docker_container(name)
+        if cid is None:
+            (RUN_DIR / name).unlink(missing_ok=True)
+        return cid is not None
 
     def is_ready(self, name: str, port: int, timeout: int = 300) -> str:
         from lmswitch.system.checks import _docker_container

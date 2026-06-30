@@ -35,12 +35,15 @@ def _docker_container(name: str) -> str | None:
 
 
 def _is_running(name: str, runtime: str) -> bool:
-    if runtime == "vllm":
-        return _docker_container(name) is not None
     pid_file = RUN_DIR / name
     if pid_file.exists():
+        content = pid_file.read_text().strip()
+        # vLLM: container ID (hex string, 12+ chars) → check Docker
+        if len(content) >= 12 and content.isalnum():
+            return _docker_container(name) is not None
+        # GGUF: PID (numeric) → check process
         try:
-            pid = int(pid_file.read_text().strip())
+            pid = int(content)
             os.kill(pid, 0)
             return True
         except (ProcessLookupError, ValueError, OSError):
