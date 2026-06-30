@@ -111,9 +111,31 @@ class VLLMRuntime(BaseRuntime):
     """vLLM model runtime using Docker."""
 
     def _setup_logging(self, name: str) -> Path:
-        """Set up logging for the model — returns log file path."""
+        """Mirror the container's output into ``RUN_DIR/<name>.log``.
+
+        Spawns a detached ``docker logs -f`` follower so vLLM models expose a
+        plain log file homogeneous with the GGUF runtime. vLLM/uvicorn log to
+        the container's stderr, so it is merged into stdout. The follower exits
+        on its own when the container stops, and must be started AFTER
+        ``docker run`` so the named container exists. Any stale entry at the
+        path (e.g. a symlink from an older version pointing at the root-owned
+        docker json log) is replaced rather than written through.
+        """
         RUN_DIR.mkdir(parents=True, exist_ok=True)
         log_path = RUN_DIR / f"{name}.log"
+        try:
+            if log_path.is_symlink() or log_path.exists():
+                os.unlink(log_path)
+            log_fh = open(log_path, "wb")
+            subprocess.Popen(
+                ["docker", "logs", "-f", f"vllm-{name}"],
+                stdout=log_fh, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            log_fh.close()
+        except OSError as exc:
+            print(f"  WARNING: could not write log file for {name} ({exc}); "
+                  f"logs still available via: docker logs -f vllm-{name}")
         return log_path
 
     def _build_cmd(self, name: str, yaml: dict, detached: bool = True) -> list[str]:
@@ -176,7 +198,6 @@ class VLLMRuntime(BaseRuntime):
 
         RUN_DIR.mkdir(parents=True, exist_ok=True)
         id_file = RUN_DIR / name
-        log_path = self._setup_logging(name)
 
         port = yaml.get("port", 0)
         print(f"Starting vLLM {name} on port {port}...")
@@ -191,6 +212,8 @@ class VLLMRuntime(BaseRuntime):
             print(f"  ✗ docker run failed (exit {result.returncode}); not waiting for readiness.")
             return RunningState("dead", detail=f"docker exit {result.returncode}")
 
+        log_path = self._setup_logging(name)
+
         try:
             timeout = int(yaml.get("ready_timeout", 600))
         except (ValueError, TypeError):
@@ -203,11 +226,10 @@ class VLLMRuntime(BaseRuntime):
             print(f"  PID file:  {id_file}")
             print(f"  Log file:  {log_path}")
         elif status == "dead":
-            print(f"  ✗ {name} container exited during startup — "
-                  f"check: docker logs vllm-{name}")
+            print(f"  ✗ {name} container exited during startup — check log: {log_path}")
         else:
             print(f"  WARNING: {name} did not become ready in {timeout}s "
-                  f"(still loading? check docker logs vllm-{name})")
+                  f"(still loading? check {log_path})")
         return RunningState(status)
 
     def stop(self, name: str, yaml: dict) -> None:
