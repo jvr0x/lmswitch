@@ -59,6 +59,7 @@ def test_regen_opencode_writes_providers():
         with mock.patch("lmswitch.sync._listening_ports", return_value={8089, 8109, 8115}), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", export_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
             changed = regen_opencode()
@@ -140,6 +141,7 @@ def test_regen_hermes_updates_primary_model():
 
         with mock.patch("lmswitch.sync._listening_ports", return_value={8089, 8109, 8115}), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
             changed = regen_hermes()
@@ -196,6 +198,7 @@ def test_regen_hermes_custom_providers_drop_stopped_keep_foreign():
 
         with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
             assert regen_hermes() is True

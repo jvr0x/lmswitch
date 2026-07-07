@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import sys
 from pathlib import Path
 
@@ -31,7 +32,7 @@ OPENCODE = HOME / ".config" / "opencode" / "opencode.json"
 OPENCODE_EXPORT = HOME / ".local" / "share" / "opencode-export" / "opencode.json"
 HERMES_CONFIG = HOME / ".hermes" / "config.yaml"
 GROK_CONFIG = HOME / ".grok" / "config.toml"
-SPARK_HOST = "spark-8912.local"
+SPARK_HOST = os.environ.get("SPARK_HOST") or f"{socket.gethostname()}.local"
 
 SYNC_OPENCODE = "SYNC_OPENCODE"
 SYNC_HERMES = "SYNC_HERMES"

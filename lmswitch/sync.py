@@ -96,7 +96,8 @@ def regen_hermes() -> bool:
         cfg["model"] = {}
 
     ports = _listening_ports()
-    running = [m for m in load_models() if m["port"] and m["port"] in ports]
+    all_models = load_models()
+    running = [m for m in all_models if m["port"] and m["port"] in ports]
     by_name = {m["name"]: m for m in running}
 
     def _is_vision(m: dict) -> bool:
@@ -160,8 +161,11 @@ def regen_hermes() -> bool:
     # up in hermes' `/model` picker (the single `model:` block only holds the
     # active one). Each model is its own llama-server on its own port, so each
     # needs its own provider entry — hermes resolves base_url per provider, not
-    # per model within a provider. We own only the SPARK_HOST entries; any other
-    # custom_providers the user added by hand are preserved.
+    # per model within a provider. We own entries whose name matches one of our
+    # managed models (running or stopped); any other custom_providers the user
+    # added by hand are preserved. Ownership is keyed on name rather than the
+    # base_url's SPARK_HOST substring so a host rename can't orphan stale
+    # entries into looking "foreign" and duplicating on next sync.
     # discover_models: false is essential. Otherwise hermes' /model picker runs
     # live `/v1/models` discovery against every entry on each open — with an
     # api_key set (even "none") that probe always fires, so a stopped/loading
@@ -179,11 +183,12 @@ def regen_hermes() -> bool:
         }
         for m in running
     ]
+    managed_names = {m["name"] for m in all_models}
     existing_cps = cfg.get("custom_providers")
     existing_cps = existing_cps if isinstance(existing_cps, list) else []
     foreign = [
         e for e in existing_cps
-        if not (isinstance(e, dict) and SPARK_HOST in str(e.get("base_url", "")))
+        if not (isinstance(e, dict) and e.get("name") in managed_names)
     ]
     new_cps = foreign + desired_entries
     if existing_cps != new_cps:
