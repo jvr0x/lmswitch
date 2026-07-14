@@ -127,7 +127,7 @@ def test_env_accepts_list_of_kv_strings():
 
 def test_graceful_keyboardinterrupt():
     """Ctrl-C anywhere under main() must exit cleanly, not raise."""
-    def boom():
+    def boom(*a, **k):
         raise KeyboardInterrupt()
 
     cli_mod.cmd_list = boom
@@ -146,7 +146,7 @@ def test_graceful_keyboardinterrupt():
 def test_toggle_syncs_opencode():
     """The interactive TUI toggle must refresh opencode.json."""
     called = {"regen": 0}
-    cli_mod._resolve = lambda t: t
+    cli_mod._resolve = lambda t: (t, None)
     cli_mod.time.sleep = lambda *a, **k: None
 
     # Create a temp model dir with the yaml file, mock CONF_DIR and _load_yaml in cli

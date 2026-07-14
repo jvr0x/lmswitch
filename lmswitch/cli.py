@@ -26,6 +26,7 @@ from lmswitch.system.io import (
     _read_config,
     _human,
     _load_yaml,
+    _cluster_hosts,
 )
 from lmswitch.system.checks import _listening_ports, _is_running
 from lmswitch.system import _get_sync_targets
@@ -61,9 +62,57 @@ def _banner() -> str:
     return "\n" + _c(art, "36") + "\n" + _c(tagline, "2") + "\n"
 
 
+def _annotate_running(models: list[dict]) -> list[dict]:
+    """Fills m["running"] for local models; remote entries arrive pre-filled."""
+    for m in models:
+        if "running" not in m:
+            m["running"] = _is_running(m["name"], m["runtime"])
+    return models
+
+
+def _gather_cluster_models() -> list[dict]:
+    """Merges model tables from the other cluster nodes over SSH.
+
+    Each peer runs ``lmswitch list --json`` and reports its own YAMLs with
+    running state already resolved on that node. Entries whose name exists
+    locally are skipped (dual models have a YAML on both nodes — the local
+    row wins). Unreachable peers are skipped silently: the cluster view is
+    best-effort and must never break the local table.
+    """
+    remote: list[dict] = []
+    local_names = {p.stem for p in CONF_DIR.glob("*.yaml")} if CONF_DIR.is_dir() else set()
+    for host in _cluster_hosts():
+        try:
+            # Full path: non-interactive ssh doesn't source the profile, so
+            # ~/.local/bin (the uv-tool install target) isn't on PATH.
+            out = subprocess.check_output(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+                 host, "$HOME/.local/bin/lmswitch", "list", "--json"],
+                text=True, stderr=subprocess.DEVNULL, timeout=10,
+            )
+            payload = json.loads(out)
+        except Exception:
+            continue
+        for m in payload.get("models", []):
+            if m.get("name") in local_names:
+                continue
+            m["host"] = payload.get("host", host)
+            m["remote_host"] = host
+            remote.append(m)
+    return remote
+
+
+def load_cluster_models() -> list[dict]:
+    """Local models (running-annotated) + peers' models, family-sorted."""
+    models = _annotate_running(load_models()) + _gather_cluster_models()
+    models.sort(key=lambda m: (m.get("fam_order", 99), m["name"]))
+    return models
+
+
 def render(models: list[dict]) -> None:
+    _annotate_running(models)
     name_w = max(max((len(m["name"]) for m in models), default=4), 4)
-    loaded = [m for m in models if _is_running(m["name"], m["runtime"])]
+    loaded = [m for m in models if m["running"]]
     total_loaded = sum(m["size"] for m in loaded)
     downloaded = [m for m in models if m["present"]]
     total_disk = sum(m["size"] for m in downloaded)
@@ -72,6 +121,16 @@ def render(models: list[dict]) -> None:
     ram = _ram_line()
     if ram:
         total, used, avail = ram
+        # GGUF weights are mmap'd file-backed pages, so /proc/meminfo counts
+        # them as reclaimable cache and "used" looks tiny with a 36G model
+        # loaded. Treat local loaded GGUF weights as used — evicting them
+        # would thrash inference. (vLLM CUDA allocations already show as used;
+        # peers' models live in the other box's RAM.)
+        gguf_gib = sum(m["size"] for m in loaded
+                       if m["runtime"] == "llama"
+                       and not m.get("remote_host")) / 1024 ** 3
+        used = min(used + gguf_gib, total)
+        avail = max(avail - gguf_gib, 0.0)
         rows = [
             ("RAM", f"{total:.0f}Gi total   "
                     + _c(f"{used:.0f}Gi used", "33") + "   "
@@ -90,15 +149,23 @@ def render(models: list[dict]) -> None:
     if any(m.get("restart") for m in models):
         print("  " + _c("R", "36") + " = auto-restart on failure (systemd)")
     print()
+    # HOST column only appears on cluster setups (a peer's model or a dual
+    # model is in the table) so single-box output stays byte-identical.
+    show_host = any(m.get("host") not in (None, "") and
+                    (m.get("remote_host") or m.get("host") == "dual")
+                    for m in models) or bool(_cluster_hosts())
+    host_w = max((len(str(m.get("host", ""))) for m in models), default=4)
+    host_w = max(host_w, 4)
+    host_hdr = f"  {'HOST':<{host_w}}" if show_host else ""
     header = (f"  {'#':>2}  S  {'TYPE':<5}  {'NAME':<{name_w}}  "
-              f"{'SIZE':>7}  DL  {'PORT':>5}  DISPLAY")
+              f"{'SIZE':>7}  DL  {'PORT':>5}{host_hdr}  DISPLAY")
     print(_c(header, "1"))
 
     disp_w = max((len(m["display"]) for m in models), default=7)
-    rule_w = name_w + disp_w + 37
+    rule_w = name_w + disp_w + 37 + ((host_w + 2) if show_host else 0)
     cur_family = None
     for i, m in enumerate(models, 1):
-        running = _is_running(m["name"], m["runtime"])
+        running = m["running"]
         if m["family"] != cur_family:
             cur_family = m["family"]
             label = f" {cur_family} "
@@ -116,8 +183,13 @@ def render(models: list[dict]) -> None:
             name = _c(name, "2")
             disp = _c(disp, "2")
         restart = "R" if m.get("restart") else " "
+        host_col = ""
+        if show_host:
+            host = str(m.get("host", "-") or "-")
+            color = "35" if host == "dual" else ("2" if m.get("remote_host") else "36")
+            host_col = "  " + _c(f"{host:<{host_w}}", color)
         print(f"  {i:>2}  {dot}{restart}  {m['type']:<5}  {name}  "
-              f"{size:>7}  {dl}  {port:>5}  {disp}")
+              f"{size:>7}  {dl}  {port:>5}{host_col}  {disp}")
     print()
 
 
@@ -230,28 +302,55 @@ def cmd_init() -> None:
     print(f"Run `lmswitch add <name>` to create one interactively.")
 
 
-def cmd_list() -> None:
-    models = load_models()
+def cmd_list(as_json: bool = False) -> None:
+    if as_json:
+        # Machine-readable dump for cluster peers: local YAMLs only (no
+        # recursion into other hosts) with running state resolved here.
+        import socket
+        models = _annotate_running(load_models())
+        print(json.dumps({"host": socket.gethostname(), "models": models}))
+        return
+    models = load_cluster_models()
     if not models:
         print(f"No models found in {CONF_DIR}")
         return
     render(models)
 
 
-def _resolve(name_or_idx: str) -> str | None:
+def _resolve(name_or_idx: str) -> tuple[str, str | None]:
+    """Resolves a name or table index to ``(name, remote_host)``.
+
+    ``remote_host`` is the SSH alias of the peer owning the model, or None
+    for local (and dual) models. Numeric indexes match the merged cluster
+    table the user just looked at.
+    """
     if name_or_idx.isdigit():
         idx = int(name_or_idx)
-        models = load_models()
+        models = load_cluster_models()
         if 1 <= idx <= len(models):
-            return models[idx - 1]["name"]
+            m = models[idx - 1]
+            return m["name"], m.get("remote_host")
         sys.exit(f"No model #{name_or_idx} (1-{len(models)})")
     if (CONF_DIR / f"{name_or_idx}.yaml").exists():
-        return name_or_idx
+        return name_or_idx, None
+    for m in _gather_cluster_models():
+        if m["name"] == name_or_idx:
+            return name_or_idx, m["remote_host"]
     sys.exit(f"Unknown model: {name_or_idx}")
 
 
+def _delegate(host: str, action: str, name: str) -> None:
+    """Runs ``lmswitch <action> <name>`` on a peer node over SSH."""
+    print(f"→ {host}: lmswitch {action} {name}")
+    subprocess.run(["ssh", "-o", "BatchMode=yes", host,
+                    "$HOME/.local/bin/lmswitch", action, name], check=False)
+
+
 def cmd_on(target: str) -> None:
-    name = _resolve(target)
+    name, remote = _resolve(target)
+    if remote:
+        _delegate(remote, "on", name)
+        return
     yaml_path = CONF_DIR / f"{name}.yaml"
     yaml = _load_yaml(yaml_path)
     start_model(name, yaml)
@@ -259,7 +358,10 @@ def cmd_on(target: str) -> None:
 
 
 def cmd_off(target: str) -> None:
-    name = _resolve(target)
+    name, remote = _resolve(target)
+    if remote:
+        _delegate(remote, "off", name)
+        return
     yaml_path = CONF_DIR / f"{name}.yaml"
     yaml = _load_yaml(yaml_path)
     runtime = yaml.get("runtime", "llama")
@@ -627,7 +729,7 @@ def main() -> None:
             print(f"lmswitch {__version__}")
             return
         if args[0] in ("list", "status", "ls"):
-            cmd_list()
+            cmd_list(as_json="--json" in args[1:])
         elif args[0] in ("on", "start") and len(args) == 2:
             cmd_on(args[1])
         elif args[0] in ("off", "stop") and len(args) == 2:
@@ -652,7 +754,7 @@ def main() -> None:
 
 
 def show() -> None:
-    models = load_models()
+    models = load_cluster_models()
     if not TTY:
         if not models:
             print(f"No models found in {CONF_DIR}")
@@ -689,13 +791,22 @@ def show() -> None:
             continue
         for n in nums:
             m = models[n - 1]
-            toggle(m["name"], "off" if _is_running(m["name"], m["runtime"]) else "on")
-        models = load_models()
+            action = "off" if m.get("running") else "on"
+            if m.get("remote_host"):
+                # Peer-owned model: delegate the whole toggle to that node's
+                # lmswitch so its runtime + sync logic apply there.
+                _delegate(m["remote_host"], action, m["name"])
+            else:
+                toggle(m["name"], action)
+        models = load_cluster_models()
         print()
 
 
 def toggle(target: str, action: str) -> None:
-    name = _resolve(target)
+    name, remote = _resolve(target)
+    if remote:
+        _delegate(remote, action, name)
+        return
     yaml_path = CONF_DIR / f"{name}.yaml"
     yaml = _load_yaml(yaml_path)
     runtime = yaml.get("runtime", "llama")

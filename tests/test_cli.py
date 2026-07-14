@@ -294,8 +294,8 @@ def test_resolve_by_index():
     ]
     with mock.patch("lmswitch.system.io.CONF_DIR", tmp), \
          mock.patch("lmswitch.cli.load_models", return_value=models):
-        assert cli_mod._resolve("1") == "model1"
-        assert cli_mod._resolve("2") == "model2"
+        assert cli_mod._resolve("1") == ("model1", None)
+        assert cli_mod._resolve("2") == ("model2", None)
 
 
 def test_resolve_by_name():
@@ -305,7 +305,7 @@ def test_resolve_by_name():
     (Path(tmp) / "mymodel.yaml").write_text("runtime: llama\nport: 8081\n")
     with mock.patch("lmswitch.cli.CONF_DIR", Path(tmp)), \
          mock.patch("lmswitch.cli.load_models", return_value=[]):
-        assert cli_mod._resolve("mymodel") == "mymodel"
+        assert cli_mod._resolve("mymodel") == ("mymodel", None)
 
 
 def test_resolve_invalid_index_exits():
@@ -339,3 +339,18 @@ def test_resolve_unknown_name_exits():
                 cli_mod._resolve("nonexistent")
             except SystemExit:
                 pass
+
+
+def test_render_counts_mmap_gguf_as_used(monkeypatch):
+    """Loaded GGUF weights (mmap page cache) must show as used RAM."""
+    models = [{
+        "name": "big-gguf", "display": "Big", "runtime": "llama",
+        "type": "gguf", "port": 8080, "ctx": "", "size": 36 * 1024 ** 3,
+        "present": True, "restart": None, "family": "Qwen", "fam_order": 0,
+        "running": True,
+    }]
+    monkeypatch.setattr(cli_mod, "_ram_line", lambda: (121.0, 14.0, 107.0))
+    monkeypatch.setattr(cli_mod, "_cluster_hosts", lambda: [])
+    out = _capture(lambda: cli_mod.render(models))
+    assert "50Gi used" in out          # 14 + 36
+    assert "71Gi available" in out     # 107 - 36

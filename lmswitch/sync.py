@@ -290,6 +290,20 @@ def regen_grok() -> bool:
     if not sections_out:
         sections_out = [[]]
 
+    # Repair a dangling `[models] default`: grok keeps the last-used model as
+    # default, but if that model is no longer being served the reference
+    # points at nothing and grok shows a dead model. Keep the user's choice
+    # sticky while it serves; otherwise fall back to the first live model
+    # (mirrors regen_hermes).
+    serving = [m["name"] for m in models if m["port"] and m["port"] in ports]
+    for sec in sections_out:
+        if not (sec and sec[0].strip() == "[models]"):
+            continue
+        for j, line in enumerate(sec):
+            mt = re.match(r'\s*default\s*=\s*"([^"]*)"', line)
+            if mt and mt.group(1) not in serving and serving:
+                sec[j] = f'default = "{serving[0]}"'
+
     # Build output: all existing sections, then new model sections at the end.
     # Strip trailing blank lines from each captured section to avoid double-spacing.
     new_lines: list[str] = []

@@ -29,11 +29,14 @@ def _memory_check(name: str, yaml: dict) -> tuple[bool, str]:
         return True, ""  # Can't measure (non-Linux); don't block.
     total, _used, avail = ram
     runtime = yaml.get("runtime", "llama")
-    if runtime == "vllm":
+    # Reason: vllm-dual reserves gpu_memory_utilization on THIS node too (each
+    # node holds its TP shard), so the same estimate applies per-node.
+    if runtime in ("vllm", "vllm-dual"):
+        default_util = 0.80 if runtime == "vllm-dual" else 0.15
         try:
-            util = float(yaml.get("gpu_memory_utilization", 0.15))
+            util = float(yaml.get("gpu_memory_utilization", default_util))
         except (ValueError, TypeError):
-            util = 0.15
+            util = default_util
         need = util * total
         what = f"vLLM reserves ~{need:.0f}Gi (gpu_memory_utilization={util})"
     else:

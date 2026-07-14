@@ -580,3 +580,54 @@ def test_cmd_off_calls_regen_all():
 
         opencode = json.loads(opencode_cfg.read_text())
         assert "qwen3.6-35b" not in opencode.get("provider", {})
+
+
+def test_regen_grok_repairs_dangling_default():
+    """A [models] default pointing at a stopped model falls back to a live one."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 262144, "Qwen3.6-35B")
+        _write_lmswitch_config(models_dir, {"SYNC_GROK": "true"})
+
+        grok_cfg = tmp / "grok.toml"
+        grok_cfg.write_text(
+            '[cli]\ninstaller = "internal"\n\n'
+            '[models]\ndefault = "deepseek-v4-flash-dspark"\n\n'
+            '[model.deepseek-v4-flash-dspark]\nmodel = "deepseek-v4-flash-dspark"\n'
+        )
+
+        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+             mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_grok() is True
+
+        content = grok_cfg.read_text()
+        assert 'default = "qwen3.6-35b"' in content
+        assert "deepseek-v4-flash-dspark" not in content
+
+
+def test_regen_grok_keeps_default_while_serving():
+    """A [models] default that IS being served stays untouched (sticky)."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 262144, "Qwen3.6-35B")
+        _make_model_cfg(models_dir, "ornith-35b-q8", 8115, 262144, "Ornith-35B")
+        _write_lmswitch_config(models_dir, {"SYNC_GROK": "true"})
+
+        grok_cfg = tmp / "grok.toml"
+        grok_cfg.write_text(
+            '[models]\ndefault = "ornith-35b-q8"\n'
+        )
+
+        with mock.patch("lmswitch.sync._listening_ports", return_value={8089, 8115}), \
+             mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            regen_grok()
+
+        assert 'default = "ornith-35b-q8"' in grok_cfg.read_text()

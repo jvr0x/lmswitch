@@ -199,24 +199,56 @@ def _family(name: str) -> tuple[int, str]:
     return len(FAMILY_RULES), "Other"
 
 
+def _hf_snapshot_size_and_present(repo_id: str, hf_cache: str) -> tuple[int, bool]:
+    """Size/presence of an HF-cache snapshot (vllm-dual models).
+
+    ``repo_id`` is a HuggingFace id like ``org/model``; the weights live under
+    ``<hf_cache>/hub/models--org--model/snapshots/<rev>/``. Symlinked shards
+    (HF cache layout) resolve to blobs, so sizes are counted via resolve().
+    """
+    cache = Path(os.path.expanduser(os.path.expandvars(hf_cache)))
+    repo_dir = cache / "hub" / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+    if not repo_dir.is_dir():
+        return 0, False
+    total = 0
+    has_weights = False
+    seen: set[Path] = set()
+    for dp, _, files in os.walk(repo_dir, followlinks=False):
+        for fn in files:
+            fp = Path(dp) / fn
+            real = fp.resolve()
+            if real in seen or not real.is_file():
+                continue
+            seen.add(real)
+            if fn.endswith(".safetensors"):
+                has_weights = True
+            total += real.stat().st_size
+    return total, has_weights
+
+
+def _dir_size_and_present(full: Path) -> tuple[int, bool]:
+    """Total size of a safetensors model directory and whether weights exist."""
+    if not full.is_dir():
+        return 0, False
+    total = 0
+    has_weights = False
+    for dp, _, files in os.walk(full):
+        for fn in files:
+            if fn.endswith(".safetensors"):
+                has_weights = True
+            fp = Path(dp) / fn
+            if fp.is_file() and not fp.is_symlink():
+                total += fp.stat().st_size
+            elif fp.is_symlink() and fp.exists():
+                total += fp.resolve().stat().st_size
+    return total, has_weights
+
+
 def _model_size_and_present(rel: str, runtime: str) -> tuple[int, bool]:
     models_dir = _models_dir()
     full = models_dir / rel
     if runtime == "vllm":
-        if not full.is_dir():
-            return 0, False
-        total = 0
-        has_weights = False
-        for dp, _, files in os.walk(full):
-            for fn in files:
-                if fn.endswith(".safetensors"):
-                    has_weights = True
-                fp = Path(dp) / fn
-                if fp.is_file() and not fp.is_symlink():
-                    total += fp.stat().st_size
-                elif fp.is_symlink() and fp.exists():
-                    total += fp.resolve().stat().st_size
-        return total, has_weights
+        return _dir_size_and_present(full)
     # GGUF
     if not full.exists():
         return 0, False
@@ -232,6 +264,17 @@ def _model_size_and_present(rel: str, runtime: str) -> tuple[int, bool]:
 # ---------------------------------------------------------------------------
 # Sync target resolution
 # ---------------------------------------------------------------------------
+
+def _cluster_hosts() -> list[str]:
+    """SSH aliases of the other cluster nodes (CLUSTER_HOSTS in .lmswitch).
+
+    Comma-separated, e.g. ``CLUSTER_HOSTS="Gigabyte"``. Empty when the box is
+    not part of a cluster — every cluster feature is off in that case.
+    """
+    cfg = _read_config()
+    raw = cfg.get("CLUSTER_HOSTS", "")
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
 
 def _get_sync_targets() -> list[str]:
     cfg = _read_config()
