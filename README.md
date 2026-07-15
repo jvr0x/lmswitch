@@ -50,8 +50,13 @@ Running `lmswitch` (the same wordmark above greets you):
 
 - **One table for everything** — loaded (`●`) vs stopped (`○`), downloaded (`✓`)
   vs missing (`✗`), per-model size/port, and RAM / disk / loaded-count totals.
-- **Two runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM in
-  Docker. Pick per model with `runtime:`.
+- **Three runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM
+  in Docker, and `vllm-dual` for tensor-parallel serving across **two DGX
+  Sparks** over a CX7 link. Pick per model with `runtime:`.
+- **Cluster view (optional)** — with `CLUSTER_HOSTS` set, the table merges the
+  other node's models with a HOST column (`spark` / `gigabyte` / `dual`) and
+  toggling a peer's model delegates over SSH. Without it, nothing changes:
+  single-box output and behavior are identical to previous versions.
 - **Readiness-aware** — after launch it polls the model's `/v1/models` endpoint
   and only reports `Ready` once it's actually serving (with a `…loading` progress
   heartbeat and crash detection), so the synced configs reflect reality, not guesses.
@@ -195,6 +200,48 @@ older llama.cpp builds that don't support `-fit`.
 **vLLM keys**: `gpu_memory_utilization` (0.15), `image`, `tool_call_parser`,
 `reasoning_parser`, `trust_remote_code`, `max_num_seqs`, `extra_args`, and more
 — see [`examples/vllm.yaml`](examples/vllm.yaml) for the full list.
+
+## Cluster mode: two Sparks (`runtime: vllm-dual`)
+
+Serves one model tensor-parallel (TP=2) across two DGX Sparks over the CX7
+link, using vLLM's native multi-node launcher (`--nnodes 2` + `--headless`
+worker — no Ray). The head container runs on this node and exposes the API;
+the worker container is started on the peer over SSH and computes rank 1 of
+every forward pass. `lmswitch on/off` manages both nodes; a failed head tears
+the worker back down.
+
+Weights can live **once** on either node: give each node its own path to the
+same directory (`model_path` / `worker_model_path`) — typically the owning
+node's `~/models/...` and the peer's NFS mount of it. Both are mounted at a
+canonical `/model` inside the containers.
+
+**vllm-dual keys** (on top of the vLLM keys above):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `worker_host` | — | SSH alias of the peer node (passwordless) |
+| `master_addr` | — | this node's CX7-link IP |
+| `worker_ip` | — | peer's CX7-link IP (its `VLLM_HOST_IP`) |
+| `master_port` | `25000` | torch distributed rendezvous port |
+| `nccl.ifname` | — | CX7 interface (also pins `GLOO_SOCKET_IFNAME` — Gloo otherwise grabs arbitrary NICs) |
+| `nccl.hca` | — | RDMA device for `NCCL_IB_HCA` |
+| `nccl.gid_index` | — | `NCCL_IB_GID_INDEX` |
+| `model_path` | — | weights dir on this node (may be an NFS mount) |
+| `worker_model_path` | `model_path` | weights dir on the peer |
+| `worker_env` | — | env overrides applied only to the worker container |
+| `gpu_memory_utilization` | `0.80` | per node — each holds its TP shard |
+| `ready_timeout` | `1800` | TP=2 loads are slow on first boot |
+
+Set `enforce_eager: false` in dual YAMLs when the profile relies on cudagraph
+capture — the single-node default is eager. And stop local models first: a
+loaded model on either node shrinks vLLM's memory budget there. See
+[`examples/vllm-dual.yaml`](examples/vllm-dual.yaml).
+
+**Cluster visibility**: add `CLUSTER_HOSTS="<ssh-alias>"` (comma-separated)
+to `ai-models/.lmswitch` on each node. `lmswitch list` then merges the peers'
+tables (via `ssh <peer> lmswitch list --json`) under a HOST column, and
+toggling a peer's model — by name or table number — delegates over SSH.
+Unreachable peers are skipped silently; the local table never breaks.
 
 ## Where to get models
 

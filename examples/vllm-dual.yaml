@@ -1,0 +1,49 @@
+# Example: tensor-parallel serving across TWO DGX Sparks (runtime: vllm-dual).
+#
+# The filename (minus .yaml) is the model id, served-model-name, and container
+# name (vllm-<id>) on BOTH nodes. The head container runs on this node and
+# exposes the API; the worker starts on `worker_host` over passwordless SSH
+# with --headless and computes rank 1 of every forward pass.
+runtime: vllm-dual
+image: "vllm/vllm-openai:cu130-nightly"          # must exist on BOTH nodes
+port: 8888
+display_name: "My Model [DUAL 2x SPARK]"
+
+# --- cluster wiring (CX7 direct link) ---------------------------------------
+worker_host: Gigabyte            # ssh alias of the peer (BatchMode must work)
+master_addr: 10.100.224.2        # this node's CX7-link IP
+worker_ip: 10.100.224.1          # peer's CX7-link IP
+master_port: 25000               # torch distributed rendezvous
+nccl:
+  ifname: enp1s0f1np1            # CX7 interface; also pins GLOO_SOCKET_IFNAME
+  hca: rocep1s0f1                # RDMA device (ibv_devices)
+  gid_index: 3
+
+# --- weights: live ONCE, referenced per node ---------------------------------
+# Each node mounts its own path to the same directory at /model inside the
+# container. Typically: the owning node's ~/models/... and the peer's NFS
+# mount of it (or vice versa).
+model: "org/My-Model"                                  # display/serve id
+model_path: "~/models-gigabyte/org/My-Model"           # path on THIS node
+worker_model_path: "~/models/org/My-Model"             # path on the peer
+
+# --- engine profile ----------------------------------------------------------
+ctx: 262144
+max_num_seqs: 6
+gpu_memory_utilization: 0.80     # per node — each holds its TP=2 shard
+enforce_eager: false             # dual profiles usually want cudagraphs
+shm_size: 64g
+ready_timeout: 1800              # first TP=2 boot is slow (load + autotune)
+
+# Node-local scratch (compile caches) must NOT live in a shared NFS dir:
+extra_mounts:
+  - "~/.cache/vllm-dual-example:/root/.cache/vllm"
+
+# env: applied to both containers; worker_env: worker-only overrides.
+env:
+  NCCL_DEBUG: WARN
+# worker_env:
+#   SOME_FLAG: 1
+
+extra_args:
+  - "--trust-remote-code"
