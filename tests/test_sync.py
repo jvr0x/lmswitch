@@ -631,3 +631,132 @@ def test_regen_grok_keeps_default_while_serving():
             regen_grok()
 
         assert 'default = "ornith-35b-q8"' in grok_cfg.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Cluster-aware sync: peers' running models must reach opencode/hermes/grok
+# too, not just this node's own — this is what was broken for gigabyte
+# (SYNC_* flags were off there, and even with them on, sync never looked at
+# the peer's models). See models.cluster.gather_cluster_models.
+# ---------------------------------------------------------------------------
+
+def _remote_model(name="deepseek-v4-flash-dspark", port=8888, running=True,
+                  host="dual", remote_host="Spark", serve_host="spark.local"):
+    return {
+        "name": name, "display": "DeepSeek Dual", "runtime": "vllm-dual",
+        "type": "dual", "port": port, "ctx": 1048576, "size": 1,
+        "present": True, "restart": None, "family": "DeepSeek", "fam_order": 2,
+        "running": running, "host": host, "remote_host": remote_host,
+        "serve_host": serve_host,
+    }
+
+
+def test_regen_opencode_includes_cluster_model():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 262144, "Qwen3.6-35B")
+        _write_lmswitch_config(models_dir, {"SYNC_OPENCODE": "true"})
+
+        opencode_cfg = tmp / "opencode.json"
+        opencode_cfg.write_text("{}")
+
+        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+             mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
+             mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "gigabyte.local"), \
+             mock.patch("lmswitch.sync._cluster_running_models",
+                        return_value=[_remote_model()]), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_opencode() is True
+
+        cfg = json.loads(opencode_cfg.read_text())
+        # Local model unaffected.
+        assert "gigabyte" in cfg["provider"]["qwen3.6-35b"]["name"].lower()
+        # Remote model present, pointed at ITS OWN serve_host (not this node's).
+        remote = cfg["provider"]["deepseek-v4-flash-dspark"]
+        assert remote["options"]["baseURL"] == "http://spark.local:8888/v1"
+        assert "dual" in remote["name"].lower()
+
+
+def test_regen_hermes_registers_cluster_model_without_stealing_default():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 262144, "Qwen3.6-35B")
+        _write_lmswitch_config(models_dir, {"SYNC_HERMES": "true"})
+
+        hermes_cfg = tmp / "hermes.yaml"
+        hermes_cfg.write_text("model:\n  default: qwen3.6-35b\n")
+
+        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+             mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "gigabyte.local"), \
+             mock.patch("lmswitch.sync._cluster_running_models",
+                        return_value=[_remote_model()]), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_hermes() is True
+
+        import yaml
+        cfg = yaml.safe_load(hermes_cfg.read_text())
+        cps = {e["name"]: e for e in cfg["custom_providers"]}
+        assert set(cps) == {"qwen3.6-35b", "deepseek-v4-flash-dspark"}
+        assert cps["deepseek-v4-flash-dspark"]["base_url"] == "http://spark.local:8888/v1"
+        # The single active `model:` slot stays local — a remote model never
+        # silently becomes hermes' default.
+        assert cfg["model"]["default"] == "qwen3.6-35b"
+
+
+def test_regen_grok_includes_cluster_model_with_host_tag():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 262144, "Qwen3.6-35B")
+        _write_lmswitch_config(models_dir, {"SYNC_GROK": "true"})
+
+        grok_cfg = tmp / "grok.toml"
+        grok_cfg.write_text('[cli]\ninstaller = "internal"\n')
+
+        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+             mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "gigabyte.local"), \
+             mock.patch("lmswitch.sync._cluster_running_models",
+                        return_value=[_remote_model()]), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_grok() is True
+
+        content = grok_cfg.read_text()
+        assert "[model.deepseek-v4-flash-dspark]" in content
+        assert 'base_url = "http://spark.local:8888/v1"' in content
+        assert "[Dual]" in content   # host tag distinguishes it from local models
+
+
+def test_regen_all_targets_unaffected_when_peer_unreachable():
+    """An unreachable/unconfigured peer must not break local sync at all —
+    _cluster_running_models degrades to empty, matching pre-cluster behavior."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 262144, "Qwen3.6-35B")
+        _write_lmswitch_config(models_dir, {"SYNC_OPENCODE": "true"})
+
+        opencode_cfg = tmp / "opencode.json"
+        opencode_cfg.write_text("{}")
+
+        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+             mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
+             mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
+             mock.patch("lmswitch.models.cluster._cluster_hosts", return_value=[]), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_opencode() is True
+
+        cfg = json.loads(opencode_cfg.read_text())
+        assert set(cfg["provider"]) == {"qwen3.6-35b"}

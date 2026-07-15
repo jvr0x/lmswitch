@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 from lmswitch.system.io import (
+    CONF_DIR,
     OPENCODE,
     OPENCODE_EXPORT,
     HERMES_CONFIG,
@@ -17,6 +18,25 @@ from lmswitch.system.io import (
 from lmswitch.system import _get_sync_targets
 from lmswitch.system.checks import _listening_ports
 from lmswitch.models.loader import load_models
+from lmswitch.models.cluster import gather_cluster_models
+
+
+def _host_label(hostname: str) -> str:
+    """Short display label for a host string, e.g. ``spark.local`` -> ``Spark``,
+    ``dual`` -> ``Dual``."""
+    return (hostname or "?").split(".")[0].capitalize()
+
+
+def _cluster_running_models() -> list[dict]:
+    """Peers' currently-running models, each already carrying ``serve_host``
+    (where its API listens) and ``remote_host`` (the SSH alias). Best-effort:
+    an unreachable peer or no ``CLUSTER_HOSTS`` configured just yields
+    nothing, so single-box sync is unaffected. See
+    ``models.cluster.gather_cluster_models``.
+    """
+    local_names = {p.stem for p in CONF_DIR.glob("*.yaml")} if CONF_DIR.is_dir() else set()
+    return [m for m in gather_cluster_models(local_names)
+            if m.get("running") and m.get("port")]
 
 
 def regen_opencode() -> bool:
@@ -32,19 +52,21 @@ def regen_opencode() -> bool:
     cfg["plugin"] = ["@warp-dot-dev/opencode-warp"]
 
     ports = _listening_ports()
+    local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", _host_label(SPARK_HOST))
+             for m in load_models() if m["port"] != 0 and m["port"] in ports]
+    remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
+              _host_label(m.get("host") or m["remote_host"]))
+              for m in _cluster_running_models()]
+
     providers: dict = {}
-    for m in load_models():
-        if m["port"] == 0 or m["port"] not in ports:
-            continue
-        base = f"http://{SPARK_HOST}:{m['port']}/v1"
-        suffix = " (Spark)"
+    for m, base, label in local + remote:
         try:
             ctx = int(m["ctx"]) if m["ctx"] else 65536
         except (ValueError, TypeError):
             ctx = 65536
         providers[m["name"]] = {
             "npm": "@ai-sdk/openai-compatible",
-            "name": m["display"] + suffix,
+            "name": f"{m['display']} ({label})",
             "options": {"baseURL": base},
             "models": {
                 m["name"]: {
@@ -171,6 +193,7 @@ def regen_hermes() -> bool:
     # api_key set (even "none") that probe always fires, so a stopped/loading
     # endpoint or slow mDNS makes the picker hang for the full HTTP timeout. We
     # already know each server's one model, so discovery is pointless here.
+    cluster_running = _cluster_running_models()
     desired_entries = [
         {
             "name": m["name"],
@@ -182,8 +205,24 @@ def regen_hermes() -> bool:
             "discover_models": False,
         }
         for m in running
+    ] + [
+        {
+            "name": m["name"],
+            "base_url": f"http://{m['serve_host']}:{m['port']}/v1",
+            "api_key": "none",
+            "model": m["name"],
+            "context_length": _ctx(m),
+            "models": {m["name"]: {}},
+            "discover_models": False,
+        }
+        for m in cluster_running
     ]
-    managed_names = {m["name"] for m in all_models}
+    # A remote model is only "managed" (safe to overwrite/prune) once it's
+    # actually reachable and included above — an unreachable peer must not
+    # cause its entries to be treated as foreign-and-preserved one sync then
+    # silently dropped the next; scoping to cluster_running keeps this stable
+    # either way since gather_cluster_models is best-effort per call.
+    managed_names = {m["name"] for m in all_models} | {m["name"] for m in cluster_running}
     existing_cps = cfg.get("custom_providers")
     existing_cps = existing_cps if isinstance(existing_cps, list) else []
     foreign = [
@@ -224,23 +263,24 @@ def regen_grok() -> bool:
         return False
 
     ports = _listening_ports()
-    models = load_models()
+    local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", "")
+             for m in load_models() if m["port"] != 0 and m["port"] in ports]
+    remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
+              f" [{_host_label(m.get('host') or m['remote_host'])}]")
+              for m in _cluster_running_models()]
 
     sections: list[str] = []
-    for m in models:
-        if m["port"] == 0 or m["port"] not in ports:
-            continue
+    for m, base, tag in local + remote:
         name_key = m["name"].replace(".", "-").replace("_", "-")
         try:
             ctx = int(m["ctx"]) if m["ctx"] else 65536
         except (ValueError, TypeError):
             ctx = 65536
-        base = f"http://{SPARK_HOST}:{m['port']}/v1"
         sections.append(
             f'[model.{name_key}]\n'
             f'model = "{m["name"]}"\n'
             f'base_url = "{base}"\n'
-            f'name = "{m["display"]}"\n'
+            f'name = "{m["display"]}{tag}"\n'
             f'context_window = {ctx}'
         )
 
@@ -295,7 +335,7 @@ def regen_grok() -> bool:
     # points at nothing and grok shows a dead model. Keep the user's choice
     # sticky while it serves; otherwise fall back to the first live model
     # (mirrors regen_hermes).
-    serving = [m["name"] for m in models if m["port"] and m["port"] in ports]
+    serving = [m["name"] for m, _base, _tag in local + remote]
     for sec in sections_out:
         if not (sec and sec[0].strip() == "[models]"):
             continue

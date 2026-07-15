@@ -33,6 +33,7 @@ from lmswitch.system import _get_sync_targets
 from lmswitch.system import usage as usage_mod
 from lmswitch.system.memory import _memory_check
 from lmswitch.models.loader import load_models
+from lmswitch.models.cluster import gather_cluster_models
 from lmswitch.runtimes import (
     start_model,
     stop_model,
@@ -71,35 +72,10 @@ def _annotate_running(models: list[dict]) -> list[dict]:
 
 
 def _gather_cluster_models() -> list[dict]:
-    """Merges model tables from the other cluster nodes over SSH.
-
-    Each peer runs ``lmswitch list --json`` and reports its own YAMLs with
-    running state already resolved on that node. Entries whose name exists
-    locally are skipped (dual models have a YAML on both nodes — the local
-    row wins). Unreachable peers are skipped silently: the cluster view is
-    best-effort and must never break the local table.
-    """
-    remote: list[dict] = []
+    """Peers' models (see ``models.cluster.gather_cluster_models``), excluding
+    anything with a YAML in this node's own ``CONF_DIR``."""
     local_names = {p.stem for p in CONF_DIR.glob("*.yaml")} if CONF_DIR.is_dir() else set()
-    for host in _cluster_hosts():
-        try:
-            # Full path: non-interactive ssh doesn't source the profile, so
-            # ~/.local/bin (the uv-tool install target) isn't on PATH.
-            out = subprocess.check_output(
-                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
-                 host, "$HOME/.local/bin/lmswitch", "list", "--json"],
-                text=True, stderr=subprocess.DEVNULL, timeout=10,
-            )
-            payload = json.loads(out)
-        except Exception:
-            continue
-        for m in payload.get("models", []):
-            if m.get("name") in local_names:
-                continue
-            m["host"] = payload.get("host", host)
-            m["remote_host"] = host
-            remote.append(m)
-    return remote
+    return gather_cluster_models(local_names)
 
 
 def load_cluster_models() -> list[dict]:
@@ -308,7 +284,11 @@ def cmd_list(as_json: bool = False) -> None:
         # recursion into other hosts) with running state resolved here.
         import socket
         models = _annotate_running(load_models())
-        print(json.dumps({"host": socket.gethostname(), "models": models}))
+        print(json.dumps({
+            "host": socket.gethostname(),
+            "serve_host": SPARK_HOST,
+            "models": models,
+        }))
         return
     models = load_cluster_models()
     if not models:

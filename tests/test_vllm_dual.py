@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 import lmswitch.cli as cli_mod
+import lmswitch.models.cluster as cluster_mod
 import lmswitch.runtimes.vllm_dual as dual_mod
 from lmswitch.models.loader import load_models
 from lmswitch.runtimes.base import runtime_registry
@@ -113,36 +114,49 @@ def test_node_cmd_model_path_per_node():
 # ---------------------------------------------------------------------------
 
 def _remote_payload():
-    return json.dumps({"host": "gigabyte", "models": [
+    return json.dumps({"host": "gigabyte", "serve_host": "gigabyte.local", "models": [
         {"name": "remote-only", "display": "R", "runtime": "vllm",
          "type": "vllm", "port": 8001, "ctx": "", "size": 1, "present": True,
-         "restart": None, "family": "Other", "fam_order": 10, "running": True},
+         "restart": None, "family": "Other", "fam_order": 10, "running": True,
+         "host": "gigabyte"},
         {"name": "qwen2.5-7b", "display": "dupe-of-local", "runtime": "llama",
          "type": "gguf", "port": 8080, "ctx": "", "size": 1, "present": True,
-         "restart": None, "family": "Qwen", "fam_order": 0, "running": False},
+         "restart": None, "family": "Qwen", "fam_order": 0, "running": False,
+         "host": "gigabyte"},
+        # A dual model exported from its head node keeps the loader's own
+        # "dual" label — the merge must not stomp it with the payload's
+        # machine-level "host" (a bug in an earlier version of this code).
+        {"name": "some-dual-model", "display": "Dual", "runtime": "vllm-dual",
+         "type": "dual", "port": 8888, "ctx": "", "size": 1, "present": True,
+         "restart": None, "family": "Other", "fam_order": 10, "running": True,
+         "host": "dual"},
     ]})
 
 
 def test_cluster_merge_dedupes_local_names(lmswitch_data_dir):
-    with mock.patch.object(cli_mod, "_cluster_hosts", return_value=["Gigabyte"]), \
-         mock.patch.object(cli_mod.subprocess, "check_output",
+    with mock.patch.object(cluster_mod, "_cluster_hosts", return_value=["Gigabyte"]), \
+         mock.patch.object(cluster_mod.subprocess, "check_output",
                            return_value=_remote_payload()):
         remote = cli_mod._gather_cluster_models()
-    names = [m["name"] for m in remote]
-    assert "remote-only" in names
+    by_name = {m["name"]: m for m in remote}
+    assert "remote-only" in by_name
     # qwen2.5-7b exists in the local fixture tree — the local row wins.
-    assert "qwen2.5-7b" not in names
-    assert remote[0]["host"] == "gigabyte"
-    assert remote[0]["remote_host"] == "Gigabyte"
-    assert remote[0]["running"] is True
+    assert "qwen2.5-7b" not in by_name
+    assert by_name["remote-only"]["host"] == "gigabyte"
+    assert by_name["remote-only"]["remote_host"] == "Gigabyte"
+    assert by_name["remote-only"]["serve_host"] == "gigabyte.local"
+    assert by_name["remote-only"]["running"] is True
+    # The dual model's own "dual" host label survives the merge.
+    assert by_name["some-dual-model"]["host"] == "dual"
+    assert by_name["some-dual-model"]["serve_host"] == "gigabyte.local"
 
 
 def test_cluster_merge_survives_unreachable_peer():
     def boom(*a, **k):
-        raise cli_mod.subprocess.CalledProcessError(255, "ssh")
+        raise cluster_mod.subprocess.CalledProcessError(255, "ssh")
 
-    with mock.patch.object(cli_mod, "_cluster_hosts", return_value=["Gigabyte"]), \
-         mock.patch.object(cli_mod.subprocess, "check_output", boom):
+    with mock.patch.object(cluster_mod, "_cluster_hosts", return_value=["Gigabyte"]), \
+         mock.patch.object(cluster_mod.subprocess, "check_output", boom):
         assert cli_mod._gather_cluster_models() == []
 
 
