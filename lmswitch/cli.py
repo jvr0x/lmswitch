@@ -373,7 +373,15 @@ def cmd_sync() -> None:
 
 
 def cmd_serve(name: str) -> None:
-    """Foreground serve — used by systemd for restart-managed models."""
+    """Foreground serve — used by systemd for restart-managed models.
+
+    Must actually exit when the backing process dies, so systemd's
+    ``Restart=always`` can recover it. A supervisor that only sleeps forever
+    defeats that entirely: this wrapper's own PID stays alive even after
+    llama-server crashes underneath it, so systemd sees a healthy unit and
+    never restarts anything — the model silently never comes back until
+    someone notices and restarts the unit by hand.
+    """
     yaml_path = CONF_DIR / f"{name}.yaml"
     if not yaml_path.exists():
         sys.exit(f"Config not found: {yaml_path}")
@@ -382,9 +390,20 @@ def cmd_serve(name: str) -> None:
     if runtime == "vllm":
         _start_vllm_foreground(name, yaml)
     else:
-        _start_llama_direct(name, yaml)
+        state = _start_llama_direct(name, yaml)
+        if state.status != "ready":
+            # Startup itself failed — exit now so systemd retries right
+            # away instead of idling in a fake "up" state.
+            sys.exit(f"{name} failed to start ({state.status})")
         while True:
-            time.sleep(1)
+            time.sleep(2)
+            # proc.poll() (not a PID-liveness check) — it's the only thing
+            # that both detects AND reaps the child, so a crash surfaces
+            # immediately instead of leaving a zombie behind while this
+            # wrapper sleeps on forever, unnoticed by systemd.
+            if state.proc is not None and state.proc.poll() is not None:
+                sys.exit(f"{name} process exited (code {state.proc.returncode}); "
+                        f"handing back to systemd for restart")
 
 
 def cmd_add(name: str) -> None:

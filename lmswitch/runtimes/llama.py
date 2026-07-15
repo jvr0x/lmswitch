@@ -100,7 +100,8 @@ class LlamaRuntime(BaseRuntime):
         else:
             print(f"  WARNING: {name} did not become ready in {timeout}s "
                   f"(still loading? check {log_path})")
-        return RunningState(status, detail=log_path if status != "ready" else "")
+        return RunningState(status, detail=log_path if status != "ready" else "",
+                           proc=proc)
 
     def stop(self, name: str, yaml: dict) -> None:
         stop_llama_by_pid(name)
@@ -232,5 +233,5 @@ def _escalate_kill(pid: int, desc: str) -> None:
 
 
 # Keep module-level functions for backward compat
-def _start_llama_direct(name: str, yaml: dict) -> None:
-    LlamaRuntime().start(name, yaml)
+def _start_llama_direct(name: str, yaml: dict) -> RunningState:
+    return LlamaRuntime().start(name, yaml)

@@ -9,16 +9,25 @@ from pathlib import Path
 class RunningState:
     """Result of a start() call."""
 
-    __slots__ = ("status", "detail")
+    __slots__ = ("status", "detail", "proc")
 
-    def __init__(self, status: str, detail: str = "") -> None:
+    def __init__(self, status: str, detail: str = "", proc=None) -> None:
         """
         Args:
             status: One of ``"ready"``, ``"dead"``, ``"timeout"``.
             detail: Human-readable message (e.g. last log lines).
+            proc: The backing ``subprocess.Popen``, for runtimes that started
+                one directly in-process (llama-server). Lets a foreground
+                supervisor (``cli.cmd_serve``) detect and reap its exit via
+                ``.poll()`` — a plain PID-liveness check (``os.kill(pid, 0)``)
+                cannot tell a zombie from a live process, since a zombie
+                keeps its PID valid until its parent reaps it. None for
+                runtimes with no local child to hold (vLLM containers,
+                remote workers).
         """
         self.status = status
         self.detail = detail
+        self.proc = proc
 
     def __repr__(self) -> str:
         return f"RunningState({self.status!r}, {self.detail!r})"
