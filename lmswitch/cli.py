@@ -79,8 +79,44 @@ def _gather_cluster_models() -> list[dict]:
 
 
 def load_cluster_models() -> list[dict]:
-    """Local models (running-annotated) + peers' models, family-sorted."""
-    models = _annotate_running(load_models()) + _gather_cluster_models()
+    """Local models (running-annotated) + peers' models, family-sorted.
+
+    Deduplicates: when the same model name appears both locally and remotely,
+    keeps the running entry (local preferred), drops the stale stopped local
+    entry so the table doesn't show unreachable duplicates.
+    """
+    local = _annotate_running(load_models())
+    remote = _gather_cluster_models()
+    _annotate_running(remote)
+
+    # Build lookup by name; prefer running over stopped, local over remote.
+    best: dict[str, dict] = {}
+    for m in remote:
+        name = m["name"]
+        if name not in best:
+            best[name] = m
+        else:
+            existing = best[name]
+            # Prefer running over stopped; if tie, prefer local (no remote_host).
+            if m["running"] and not existing["running"]:
+                best[name] = m
+            elif m["running"] == existing["running"] and not existing.get("remote_host"):
+                best[name] = m  # local wins over remote at same running state
+
+    for m in local:
+        name = m["name"]
+        if name not in best:
+            best[name] = m
+        else:
+            existing = best[name]
+            # Local always wins if it's running. If local is stopped but remote
+            # is running, keep remote (the local entry would be unreachable).
+            if m["running"]:
+                best[name] = m
+            elif not existing["running"] and m.get("remote_host"):
+                best[name] = m  # local stopped beats remote stopped
+
+    models = list(best.values())
     models.sort(key=lambda m: (m.get("fam_order", 99), m["name"]))
     return models
 
