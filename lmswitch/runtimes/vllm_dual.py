@@ -22,9 +22,13 @@ Minimal YAML:
       gid_index: 3
 
 Optional: ``master_port`` (25000), ``shm_size`` ("64g"), ``env`` /
-``worker_env`` maps, ``extra_mounts``, ``extra_args``, ``entrypoint``,
-``gpu_memory_utilization`` (0.80), ``ctx``, ``max_num_seqs`` (6),
-``ready_timeout`` (1800 — TP=2 loads take a while).
+``worker_env`` maps, ``extra_mounts`` (identical on both nodes) plus
+``head_extra_mounts`` / ``worker_extra_mounts`` (each exclusive to its side,
+for a second asset needing a different host path per node — same asymmetry
+as model_path/worker_model_path, e.g. a speculative-decode drafter
+checkpoint), ``extra_args``, ``entrypoint``, ``gpu_memory_utilization``
+(0.80), ``ctx``, ``max_num_seqs`` (6), ``ready_timeout`` (1800 — TP=2 loads
+take a while).
 """
 
 from __future__ import annotations
@@ -132,6 +136,16 @@ class VLLMDualRuntime(VLLMRuntime):
                 cmd += ["-e", f"{key}={val}"]
 
         cmd += _extra_mounts(yaml)
+        # head_extra_mounts / worker_extra_mounts: for a second asset (e.g. a
+        # speculative-decode drafter checkpoint) that needs a *different* host
+        # path on each side — same asymmetry model_path/worker_model_path
+        # solves for the primary weights. Each list is exclusive to its side
+        # (not layered on top of `extra_mounts`, which stays for genuinely
+        # identical-on-both-nodes mounts, e.g. a shared compile cache), so a
+        # recipe using this should leave the corresponding container path out
+        # of `extra_mounts` entirely.
+        side_mounts = yaml.get("head_extra_mounts") if head else yaml.get("worker_extra_mounts")
+        cmd += _extra_mounts({"extra_mounts": side_mounts or []})
         cmd += _env_args(yaml)
         if not head:
             # Worker-only env overrides (after `env:` so they win).

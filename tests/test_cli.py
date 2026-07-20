@@ -618,3 +618,42 @@ def test_parse_view_flags_missing_search_value_exits():
             assert False, "expected SystemExit"
         except SystemExit:
             pass
+
+# ---------------------------------------------------------------------------
+# Regression: stopped-stopped tie between a local and a same-named remote
+# recipe must keep the local entry (this node's own YAML), not the peer's.
+# ---------------------------------------------------------------------------
+
+def test_load_cluster_models_local_wins_stopped_tie(lmswitch_data_dir):
+    """A model declared on both nodes, both stopped, shows as local — not
+    silently attributed to the peer (the actual bug: qwen3.6-35b-q8-mtp
+    existed verbatim on spark and gigabyte; both stopped; the table showed
+    it as owned by gigabyte because the old tie-break check tested
+    ``remote_host`` on the *local* entry, which is never set there)."""
+    remote_dupe = {
+        "name": "qwen2.5-7b", "display": "dupe-of-local", "runtime": "llama",
+        "type": "gguf", "port": 8081, "ctx": "", "size": 1, "present": True,
+        "restart": None, "family": "Qwen", "fam_order": 0, "running": False,
+        "host": "gigabyte", "remote_host": "Gigabyte", "serve_host": "gigabyte.local",
+    }
+    with mock.patch.object(cli_mod, "_gather_cluster_models", return_value=[remote_dupe]):
+        models = cli_mod.load_cluster_models()
+    by_name = {m["name"]: m for m in models}
+    winner = by_name["qwen2.5-7b"]
+    assert "remote_host" not in winner
+    assert winner["display"] != "dupe-of-local"
+
+
+def test_load_cluster_models_remote_wins_when_running_and_local_stopped(lmswitch_data_dir):
+    """A running remote copy must still beat a stopped local copy — the
+    local entry would be unreachable if shown as the source of truth."""
+    remote_running = {
+        "name": "qwen2.5-7b", "display": "running-on-gigabyte", "runtime": "llama",
+        "type": "gguf", "port": 8081, "ctx": "", "size": 1, "present": True,
+        "restart": None, "family": "Qwen", "fam_order": 0, "running": True,
+        "host": "gigabyte", "remote_host": "Gigabyte", "serve_host": "gigabyte.local",
+    }
+    with mock.patch.object(cli_mod, "_gather_cluster_models", return_value=[remote_running]):
+        models = cli_mod.load_cluster_models()
+    by_name = {m["name"]: m for m in models}
+    assert by_name["qwen2.5-7b"]["remote_host"] == "Gigabyte"

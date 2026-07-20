@@ -111,10 +111,14 @@ def load_cluster_models() -> list[dict]:
             existing = best[name]
             # Local always wins if it's running. If local is stopped but remote
             # is running, keep remote (the local entry would be unreachable).
-            if m["running"]:
+            # If both are stopped, local still wins — it's this node's own
+            # YAML and should be shown/toggled from here, not attributed to
+            # the peer. (Bug fixed 2026-07-20: the old check tested
+            # ``m.get("remote_host")`` on a *local* entry, which is never
+            # set, so this branch could never fire — the remote copy always
+            # won stopped/stopped ties and the table showed the wrong host.)
+            if m["running"] or not existing["running"]:
                 best[name] = m
-            elif not existing["running"] and m.get("remote_host"):
-                best[name] = m  # local stopped beats remote stopped
 
     models = list(best.values())
     models.sort(key=lambda m: (m.get("fam_order", 99), m["name"]))

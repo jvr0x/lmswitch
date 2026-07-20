@@ -17,7 +17,10 @@ from lmswitch.system.io import (
     _dir_size_and_present,
 )
 
-_TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "dual"}
+# TYPE column reflects the backend, not topology — vllm-dual is vLLM running
+# across two nodes, so it shows "vllm" here. The HOST column's "dual" label
+# (see below) is what tells the two-node story.
+_TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm"}
 
 
 def load_models() -> list[dict]:

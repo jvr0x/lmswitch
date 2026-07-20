@@ -109,6 +109,41 @@ def test_node_cmd_model_path_per_node():
         assert "HF_HOME=/cache/huggingface" not in cmd
 
 
+def test_node_cmd_head_worker_extra_mounts_are_per_side():
+    """head_extra_mounts / worker_extra_mounts each apply to their own side
+    only, at host paths that can legitimately differ (e.g. a speculative-
+    decode drafter checkpoint mounted via a different NFS alias on each
+    side, same asymmetry as model_path/worker_model_path) — and are not
+    layered with each other (no duplicate mount at the same container
+    path, unlike the universal `extra_mounts`)."""
+    yaml = dict(DUAL_YAML,
+                extra_mounts=["/home/u/shared/thing:/thing:ro"],
+                head_extra_mounts=["/home/u/models-gigabyte/org/Drafter:/drafter:ro"],
+                worker_extra_mounts=["/home/u/models/org/Drafter:/drafter:ro"])
+    rt = VLLMDualRuntime()
+    head = rt._node_cmd("m", yaml, node_rank=0)
+    worker = rt._node_cmd("m", yaml, node_rank=1)
+    # extra_mounts applies to both nodes identically.
+    assert "/home/u/shared/thing:/thing:ro" in head
+    assert "/home/u/shared/thing:/thing:ro" in worker
+    # head/worker_extra_mounts are exclusive to their own side.
+    assert "/home/u/models-gigabyte/org/Drafter:/drafter:ro" in head
+    assert "/home/u/models-gigabyte/org/Drafter:/drafter:ro" not in worker
+    assert "/home/u/models/org/Drafter:/drafter:ro" not in head
+    assert "/home/u/models/org/Drafter:/drafter:ro" in worker
+    # No duplicate mount at the same container path on either side.
+    assert sum("/drafter" in a for a in head) == 1
+    assert sum("/drafter" in a for a in worker) == 1
+
+
+def test_node_cmd_no_side_extra_mounts_is_noop():
+    """Omitting head/worker_extra_mounts doesn't add any extra -v flags."""
+    rt = VLLMDualRuntime()
+    head = rt._node_cmd("m", DUAL_YAML, node_rank=0)
+    worker = rt._node_cmd("m", DUAL_YAML, node_rank=1)
+    assert head.count("-v") == worker.count("-v")
+
+
 # ---------------------------------------------------------------------------
 # Edge: cluster view merge
 # ---------------------------------------------------------------------------
@@ -200,7 +235,9 @@ def test_loader_dual_model_host_and_type(lmswitch_data_dir, tmp_path):
     )
     (lmswitch_data_dir / "zz-dual.yaml").write_text(yaml_text)
     dual = [m for m in load_models() if m["name"] == "zz-dual"]
-    assert dual and dual[0]["type"] == "dual"
+    # TYPE reflects the backend (vllm), not topology — HOST carries the
+    # two-node story via the "dual" label.
+    assert dual and dual[0]["type"] == "vllm"
     assert dual[0]["host"] == "dual"
     assert dual[0]["present"] is True
     assert dual[0]["size"] == 64
