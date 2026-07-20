@@ -5,3 +5,8 @@ __pycache__/
 logs/
 lmswitch.egg-info/
 running/
+
+# ai-models is intentionally not tracked here — it's a plain, operational
+# recipe directory (frequent local add/delete), not a submodule. A
+# git-connected reference clone lives at ~/utils/ai-models instead.
+ai-models/
