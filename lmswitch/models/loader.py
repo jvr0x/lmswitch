@@ -17,10 +17,12 @@ from lmswitch.system.io import (
     _dir_size_and_present,
 )
 
-# TYPE column reflects the backend, not topology — vllm-dual is vLLM running
-# across two nodes, so it shows "vllm" here. The HOST column's "dual" label
-# (see below) is what tells the two-node story.
-_TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm"}
+# TYPE column reflects the backend, not topology — vllm-dual/vllm-dual-ray
+# are both vLLM running across two nodes (mp vs Ray executor), so both show
+# "vllm" here. The HOST column's "dual" label (see below) is what tells the
+# two-node story.
+_TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm", "vllm-dual-ray": "vllm"}
+_DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray")
 
 
 def load_models() -> list[dict]:
@@ -37,7 +39,7 @@ def load_models() -> list[dict]:
             continue
         runtime = env.get("runtime", "llama")
         rel = env.get("model", "")
-        if runtime == "vllm-dual":
+        if runtime in _DUAL_RUNTIMES:
             # Dual models point at a plain weights directory (model_path,
             # possibly an NFS mount of the peer's ~/models) or, failing that,
             # an HF repo id inside the shared cluster cache.
@@ -67,7 +69,7 @@ def load_models() -> list[dict]:
             "restart": env.get("restart"),
             "family": fam_label,
             "fam_order": fam_order,
-            "host": "dual" if runtime == "vllm-dual" else local_host,
+            "host": "dual" if runtime in _DUAL_RUNTIMES else local_host,
         })
     models.sort(key=lambda m: (m["fam_order"], m["name"]))
     return models

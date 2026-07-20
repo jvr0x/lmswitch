@@ -188,6 +188,8 @@ FAMILY_RULES = [
     ("Nex", ("nex",)),
     ("Step", ("step",)),
     ("Ornith", ("ornith",)),
+    ("MiMo", ("mimo",)),
+    ("MiniMax", ("minimax",)),
 ]
 
 

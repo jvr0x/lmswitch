@@ -138,7 +138,7 @@ def _filter_models(models: list[dict], view: str = "default",
     """
     out = []
     for m in models:
-        is_dual = m.get("runtime") == "vllm-dual" or m.get("type") == "dual"
+        is_dual = m.get("runtime") in ("vllm-dual", "vllm-dual-ray") or m.get("type") == "dual"
         if view == "local" and (m.get("remote_host") or is_dual):
             continue
         if view == "dual" and not is_dual:

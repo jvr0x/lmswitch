@@ -32,6 +32,7 @@ from lmswitch.runtimes.base import BaseRuntime, RunningState, runtime_registry
 from lmswitch.runtimes.llama import LlamaRuntime, _extra_args, _start_llama_direct
 from lmswitch.runtimes.vllm import VLLMRuntime, _vllm_args, _start_vllm_direct, _start_vllm_foreground
 from lmswitch.runtimes.vllm_dual import VLLMDualRuntime
+from lmswitch.runtimes.vllm_dual_ray import VLLMDualRayRuntime
 from lmswitch.runtimes.systemd import _start_systemd
 from lmswitch.runtimes.wait import _wait_ready
 
@@ -52,12 +53,14 @@ __all__ = [
     "LlamaRuntime",
     "VLLMRuntime",
     "VLLMDualRuntime",
+    "VLLMDualRayRuntime",
 ]
 
 # Register runtimes — called at import time
 runtime_registry.register("llama", LlamaRuntime)
 runtime_registry.register("vllm", VLLMRuntime)
 runtime_registry.register("vllm-dual", VLLMDualRuntime)
+runtime_registry.register("vllm-dual-ray", VLLMDualRayRuntime)
 
 
 def start_model(name: str, yaml: dict) -> None:
