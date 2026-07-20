@@ -121,6 +121,30 @@ def load_cluster_models() -> list[dict]:
     return models
 
 
+def _filter_models(models: list[dict], view: str = "default",
+                   show_missing: bool = False) -> list[dict]:
+    """Filters the merged model table for display.
+
+    ``view`` selects which recipes to keep: ``"default"`` (everything),
+    ``"local"`` (this node's single-box recipes — drops peer entries and
+    two-node dual recipes), or ``"dual"`` (vllm-dual recipes only). Unless
+    ``show_missing`` is set, recipes that are declared but whose weights
+    aren't downloaded on their serving node (present=False and not running)
+    are dropped.
+    """
+    out = []
+    for m in models:
+        is_dual = m.get("runtime") == "vllm-dual" or m.get("type") == "dual"
+        if view == "local" and (m.get("remote_host") or is_dual):
+            continue
+        if view == "dual" and not is_dual:
+            continue
+        if not show_missing and not (m.get("present") or m.get("running")):
+            continue
+        out.append(m)
+    return out
+
+
 def render(models: list[dict]) -> None:
     _annotate_running(models)
     name_w = max(max((len(m["name"]) for m in models), default=4), 4)
@@ -314,10 +338,13 @@ def cmd_init() -> None:
     print(f"Run `lmswitch add <name>` to create one interactively.")
 
 
-def cmd_list(as_json: bool = False) -> None:
+def cmd_list(as_json: bool = False, view: str = "default",
+             show_missing: bool = False, search: str = "") -> None:
     if as_json:
         # Machine-readable dump for cluster peers: local YAMLs only (no
         # recursion into other hosts) with running state resolved here.
+        # Always unfiltered — peers apply their own display filters after
+        # merging, and hiding entries here would corrupt the cluster view.
         import socket
         models = _annotate_running(load_models())
         print(json.dumps({
@@ -326,11 +353,32 @@ def cmd_list(as_json: bool = False) -> None:
             "models": models,
         }))
         return
-    models = load_cluster_models()
+    all_models = load_cluster_models()
+    models = _filter_models(all_models, view, show_missing)
+    if search:
+        models = _search_models(models, search)
     if not models:
-        print(f"No models found in {CONF_DIR}")
+        if all_models:
+            print(f"No recipes match this view ({len(all_models)} declared "
+                  f"— try `lmswitch list --all`)")
+        else:
+            print(f"No models found in {CONF_DIR}")
         return
     render(models)
+    _print_hidden_hint(len(all_models) - len(models), view, show_missing)
+
+
+def _print_hidden_hint(hidden: int, view: str, show_missing: bool) -> None:
+    """Prints a dim one-liner when the current view hides some recipes."""
+    if hidden <= 0:
+        return
+    if view == "default" and not show_missing:
+        reason = "weights not downloaded"
+    else:
+        reason = f"filtered by --{view}" if view != "default" else "hidden"
+    print("  " + _c(f"{hidden} recipe(s) hidden ({reason}) — "
+                    "use --all to show everything", "2"))
+    print()
 
 
 def _resolve(name_or_idx: str) -> tuple[str, str | None]:
@@ -338,11 +386,12 @@ def _resolve(name_or_idx: str) -> tuple[str, str | None]:
 
     ``remote_host`` is the SSH alias of the peer owning the model, or None
     for local (and dual) models. Numeric indexes match the merged cluster
-    table the user just looked at.
+    table the user just looked at (the default view — recipes with missing
+    weights are hidden, matching plain ``lmswitch list``).
     """
     if name_or_idx.isdigit():
         idx = int(name_or_idx)
-        models = load_cluster_models()
+        models = _filter_models(load_cluster_models())
         if 1 <= idx <= len(models):
             m = models[idx - 1]
             return m["name"], m.get("remote_host")
@@ -734,8 +783,17 @@ On toggle, lmswitch syncs the list of currently-serving models to any tools
 you opted into during `lmswitch init` (opencode.json, hermes config.yaml, grok
 config.toml). Toggle `sync` to re-sync on demand.
 
+By default, recipes whose model weights aren't downloaded on their serving
+node are hidden. View flags (work on `lmswitch` and `lmswitch list`):
+  -a, --all                 show ALL recipes, including missing weights
+  -l, --local               only this node's single-box recipes (no peers, no dual)
+  -d, --dual                only two-node vllm-dual recipes
+  -s, --search TEXT         only recipes whose name or display matches TEXT
+
 Usage:
-  lmswitch                  interactive TUI: list models, type numbers to toggle
+  lmswitch                  interactive TUI: numbers toggle models; letters
+                            switch views instantly (a all, l local, d dual,
+                            / search, q quit) and never enter the number field
   lmswitch list             print the model table (read-only)
   lmswitch on  <name|#>     start a model
   lmswitch off <name|#>     stop a model
@@ -750,21 +808,59 @@ Usage:
 """
 
 
+def _parse_view_flags(args: list[str]) -> tuple[str, bool, str, list[str]]:
+    """Extracts view and search flags from argv.
+
+    Returns ``(view, show_missing, search, rest)`` where ``view`` is
+    "default", "local" or "dual", ``show_missing`` reflects ``--all``,
+    ``search`` reflects ``-s/--search TEXT`` (empty string if absent), and
+    ``rest`` is the argv with all of the above removed. ``--local`` and
+    ``--dual`` are mutually exclusive.
+    """
+    bare_flags = {"-a", "--all", "-l", "--local", "-d", "--dual"}
+    found = set()
+    search = ""
+    rest = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in bare_flags:
+            found.add(a)
+            i += 1
+            continue
+        if a in ("-s", "--search"):
+            if i + 1 >= len(args):
+                sys.exit(f"{a} requires a search term")
+            search = args[i + 1]
+            i += 2
+            continue
+        rest.append(a)
+        i += 1
+    want_local = found & {"-l", "--local"}
+    want_dual = found & {"-d", "--dual"}
+    if want_local and want_dual:
+        sys.exit("--local and --dual are mutually exclusive")
+    view = "local" if want_local else "dual" if want_dual else "default"
+    return view, bool(found & {"-a", "--all"}), search, rest
+
+
 def main() -> None:
     try:
         args = sys.argv[1:]
-        if not args:
-            show()
-            return
-        if args[0] in ("-h", "--help"):
+        if args and args[0] in ("-h", "--help"):
             print(_HELP)
             return
-        if args[0] in ("-v", "--version"):
+        if args and args[0] in ("-v", "--version"):
             from lmswitch import __version__
             print(f"lmswitch {__version__}")
             return
+        view, show_missing, search, args = _parse_view_flags(args)
+        if not args:
+            show(view, show_missing, search)
+            return
         if args[0] in ("list", "status", "ls"):
-            cmd_list(as_json="--json" in args[1:])
+            cmd_list(as_json="--json" in args[1:], view=view,
+                     show_missing=show_missing, search=search)
         elif args[0] in ("on", "start") and len(args) == 2:
             cmd_on(args[1])
         elif args[0] in ("off", "stop") and len(args) == 2:
@@ -788,14 +884,151 @@ def main() -> None:
         raise SystemExit(130)
 
 
-def show() -> None:
-    models = load_cluster_models()
+def _read_key() -> str:
+    """Reads one keypress from stdin in raw mode.
+
+    Escape sequences (arrow keys etc.) are swallowed whole so their trailing
+    letters (e.g. the ``A`` in ``ESC [ A``) can't leak into the key handling.
+    """
+    import select
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            # Drain the rest of the escape sequence without blocking.
+            while select.select([fd], [], [], 0.01)[0]:
+                sys.stdin.read(1)
+            return ""
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return ch
+
+
+def _prompt_toggle() -> tuple[str, str]:
+    """Reads the toggle prompt one keypress at a time.
+
+    Only digits, space and comma go into the selection field; Enter submits
+    it as ``("nums", buffer)``. Any letter acts immediately and is returned
+    as ``("key", letter)`` — letters can never end up in the field.
+    """
+    buf = ""
+    prompt = "  Toggle # (Enter submits · letters act instantly): "
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    while True:
+        ch = _read_key()
+        if ch in ("\x03", "\x04"):  # Ctrl-C / Ctrl-D
+            print()
+            raise KeyboardInterrupt
+        if ch in ("\r", "\n"):
+            print()
+            return ("nums", buf)
+        if ch in ("\x7f", "\b"):
+            if buf:
+                buf = buf[:-1]
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+            continue
+        if ch.isdigit() or ch in " ,":
+            buf += ch
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+            continue
+        if ch == "/":
+            print(ch)
+            return ("key", "/")
+        if ch.isalpha():
+            print(ch)
+            return ("key", ch.lower())
+        # Anything else (escape sequences, control chars) is ignored.
+
+
+def _prompt_search() -> str | None:
+    """Reads a free-text search query, one keypress at a time.
+
+    Unlike the toggle field, letters, digits and spaces are all accepted —
+    this only runs after the user explicitly asked to search via ``/``, so
+    it's never at risk of swallowing a toggle number. Enter submits the
+    query (an empty query clears the filter); a bare Escape cancels and
+    leaves the current query untouched.
+    """
+    buf = ""
+    prompt = "  Search name/display (Enter applies, empty clears, Esc cancels): "
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    while True:
+        ch = _read_key()
+        if ch in ("\x03", "\x04"):  # Ctrl-C / Ctrl-D
+            print()
+            raise KeyboardInterrupt
+        if ch in ("\r", "\n"):
+            print()
+            return buf
+        if ch == "":  # bare Escape (no following bracket sequence)
+            print()
+            return None
+        if ch in ("\x7f", "\b"):
+            if buf:
+                buf = buf[:-1]
+                sys.stdout.write("\b \b")
+                sys.stdout.flush()
+            continue
+        if ch.isprintable():
+            buf += ch
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+            continue
+        # Other control chars are ignored.
+
+
+def _search_models(models: list[dict], query: str) -> list[dict]:
+    """Keeps only models whose name or display name contains *query* (case-insensitive)."""
+    q = query.lower()
+    return [m for m in models
+            if q in m["name"].lower() or q in m.get("display", "").lower()]
+
+
+def _view_legend(view: str, show_missing: bool, search: str = "") -> str:
+    """One-line legend of the view keys; the active view is highlighted."""
+    def tag(key: str, label: str, active: bool) -> str:
+        t = f"[{key}] {label}"
+        return _c(t, "1;32") if active else _c(t, "2")
+    search_label = f'search: "{search}"' if search else "search"
+    return ("  " + tag("a", "all", show_missing)
+            + "  " + tag("l", "local", view == "local")
+            + "  " + tag("d", "dual", view == "dual")
+            + "  " + tag("/", search_label, bool(search))
+            + "  " + _c("[q] quit", "2"))
+
+
+def _apply_filters(all_models: list[dict], view: str, show_missing: bool,
+                   search: str) -> list[dict]:
+    """Applies the view filter followed by the free-text search filter."""
+    models = _filter_models(all_models, view, show_missing)
+    if search:
+        models = _search_models(models, search)
+    return models
+
+
+def show(view: str = "default", show_missing: bool = False,
+         search: str = "") -> None:
+    all_models = load_cluster_models()
+    models = _apply_filters(all_models, view, show_missing, search)
     if not TTY:
         if not models:
-            print(f"No models found in {CONF_DIR}")
-            print("Run `lmswitch add <name>` to create a model config.")
+            if all_models:
+                print(f"No recipes match this view ({len(all_models)} declared "
+                      f"— try `lmswitch --all`)")
+            else:
+                print(f"No models found in {CONF_DIR}")
+                print("Run `lmswitch add <name>` to create a model config.")
             return
         render(models)
+        _print_hidden_hint(len(all_models) - len(models), view, show_missing)
         return
     print(_banner())
     # Interactive: always enter the loop so the user sees the table/headers
@@ -803,26 +1036,53 @@ def show() -> None:
     while True:
         if models:
             render(models)
+            _print_hidden_hint(len(all_models) - len(models), view, show_missing)
+        elif all_models:
+            print()
+            print(f"  No recipes match this view ({len(all_models)} declared "
+                  f"— try `lmswitch --all`)")
         else:
             print()
             print(f"  No models found in {CONF_DIR}")
             print("  Run `lmswitch add <name>` to create a model config.")
+        print(_view_legend(view, show_missing, search))
         try:
-            choice = input("  Toggle # (space/comma separated, enter or q to quit): ").strip()
+            kind, val = _prompt_toggle()
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        if choice.lower() in ("q", "quit", "exit", ""):
-            return
-        if choice.lower() == "stats":
-            cmd_stats()
+        if kind == "key":
+            if val == "q":
+                return
+            if val == "/":
+                try:
+                    q = _prompt_search()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return
+                if q is not None:
+                    search = q.strip()
+            elif val == "a":
+                show_missing = not show_missing
+            elif val == "l":
+                view = "default" if view == "local" else "local"
+            elif val == "d":
+                view = "default" if view == "dual" else "dual"
+            else:
+                print(f"  ? unknown key '{val}' — a/l/d switch views, "
+                      "/ search, q quit\n")
+                continue
+            models = _apply_filters(all_models, view, show_missing, search)
             continue
+        # kind == "nums": Enter on an empty field quits, like before.
+        if not val.strip():
+            return
         if not models:
             print("  (no models to toggle — use `lmswitch add <name>` first)\n")
             continue
-        nums = [int(t) for t in re.split(r"[^0-9]+", choice) if t]
+        nums = [int(t) for t in re.split(r"[^0-9]+", val) if t]
         if not nums or any(not (1 <= n <= len(models)) for n in nums):
-            print(f"  ? enter 1-{len(models)} (one or more, e.g. 8 9 24), or 'stats' (or q)\n")
+            print(f"  ? enter 1-{len(models)} (one or more, e.g. 8 9 24)\n")
             continue
         for n in nums:
             m = models[n - 1]
@@ -833,7 +1093,8 @@ def show() -> None:
                 _delegate(m["remote_host"], action, m["name"])
             else:
                 toggle(m["name"], action)
-        models = load_cluster_models()
+        all_models = load_cluster_models()
+        models = _apply_filters(all_models, view, show_missing, search)
         print()
 
 

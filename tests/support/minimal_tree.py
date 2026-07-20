@@ -68,6 +68,9 @@ def build_minimal_tree(parent: Path | None = None) -> Path:
     vllm_model_dir = models_dir / "mistral-7b"
     vllm_model_dir.mkdir(parents=True, exist_ok=True)
     (vllm_model_dir / "config.json").touch()  # minimal safetensors marker
+    # Weights placeholder so _dir_size_and_present reports present=True,
+    # matching this module's docstring contract.
+    (vllm_model_dir / "model.safetensors").touch()
 
     # ---- no-op llama-server wrapper (for evidence capture / test_mode) ----
     llama_bin = data_root / "bin"
