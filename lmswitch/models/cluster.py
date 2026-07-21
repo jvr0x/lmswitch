@@ -9,6 +9,30 @@ from lmswitch.system.io import _cluster_hosts
 from lmswitch.system.checks import _is_running as _checks_is_running
 
 
+def _resolved_host(alias: str) -> str | None:
+    """Resolves an SSH alias to its configured ``Hostname`` via ``ssh -G``.
+
+    A peer's own ``lmswitch list --json`` reports its self-computed
+    ``serve_host`` — by default ``<hostname>.local``, resolved via mDNS. That
+    hostname has proven intermittently flaky for plain HTTP clients (grok
+    failed outright; raw curl reproduced ~30% stalls to the full 5s timeout,
+    even though the underlying network path is fine). The SSH alias used to
+    reach the peer is already a known-good address — management access
+    depends on it working — so prefer that resolved address for HTTP
+    base_urls too, rather than the peer's own mDNS self-report.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ssh", "-G", alias], text=True, stderr=subprocess.DEVNULL, timeout=3,
+        )
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if line.startswith("hostname "):
+            return line.split(None, 1)[1].strip() or None
+    return None
+
+
 def _is_running(name: str, runtime: str = "llama") -> bool:
     """Check if a model is actually running on this machine.
 
@@ -28,6 +52,10 @@ def gather_cluster_models(local_names: set[str]) -> list[dict]:
     Each peer runs ``lmswitch list --json`` and reports its own YAMLs with
     running state and its own ``serve_host`` (the mDNS name it uses for its
     own config sync, e.g. ``gigabyte.local``) already resolved on that node.
+    That self-reported mDNS hostname is used only as a fallback — the SSH
+    alias's own resolved ``Hostname`` (see ``_resolved_host``) is preferred
+    since it's already a proven-reliable address, avoiding mDNS flakiness
+    that has caused real, intermittent client-facing connection failures.
     Entries whose name is in ``local_names`` AND are actually running on this
     machine are skipped (dual models have a YAML only on the head node — the
     local row wins there, and the head's export is what peers see). Models
@@ -54,7 +82,7 @@ def gather_cluster_models(local_names: set[str]) -> list[dict]:
             payload = json.loads(out)
         except Exception:
             continue
-        serve_host = payload.get("serve_host") or payload.get("host", host)
+        serve_host = _resolved_host(host) or payload.get("serve_host") or payload.get("host", host)
         for m in payload.get("models", []):
             # Only skip if the model is both known locally AND actually
             # running here — prevents filtering out remote models whose
