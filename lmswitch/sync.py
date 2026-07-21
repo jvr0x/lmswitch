@@ -16,7 +16,7 @@ from lmswitch.system.io import (
     SYNC_GROK,
 )
 from lmswitch.system import _get_sync_targets
-from lmswitch.system.checks import _listening_ports
+from lmswitch.system.checks import _is_running
 from lmswitch.models.loader import load_models
 from lmswitch.models.cluster import gather_cluster_models
 
@@ -51,9 +51,9 @@ def regen_opencode() -> bool:
     cfg["$schema"] = "https://opencode.ai/config.json"
     cfg["plugin"] = ["@warp-dot-dev/opencode-warp"]
 
-    ports = _listening_ports()
     local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", _host_label(SPARK_HOST))
-             for m in load_models() if m["port"] != 0 and m["port"] in ports]
+             for m in load_models()
+             if m["port"] != 0 and _is_running(m["name"], m["runtime"])]
     remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
               _host_label(m.get("host") or m["remote_host"]))
               for m in _cluster_running_models()]
@@ -117,9 +117,9 @@ def regen_hermes() -> bool:
     if not isinstance(cfg.get("model"), dict):
         cfg["model"] = {}
 
-    ports = _listening_ports()
     all_models = load_models()
-    running = [m for m in all_models if m["port"] and m["port"] in ports]
+    running = [m for m in all_models
+              if m["port"] and _is_running(m["name"], m["runtime"])]
     by_name = {m["name"]: m for m in running}
 
     def _is_vision(m: dict) -> bool:
@@ -262,9 +262,9 @@ def regen_grok() -> bool:
     if not GROK_CONFIG.parent.exists():
         return False
 
-    ports = _listening_ports()
     local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", "")
-             for m in load_models() if m["port"] != 0 and m["port"] in ports]
+             for m in load_models()
+             if m["port"] != 0 and _is_running(m["name"], m["runtime"])]
     remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
               f" [{_host_label(m.get('host') or m['remote_host'])}]")
               for m in _cluster_running_models()]

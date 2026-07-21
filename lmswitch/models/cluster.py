@@ -3,36 +3,23 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 
-from lmswitch.system.io import _cluster_hosts, CONF_DIR, RUN_DIR, _load_yaml
-from lmswitch.system.checks import _listening_ports
+from lmswitch.system.io import _cluster_hosts
+from lmswitch.system.checks import _is_running as _checks_is_running
 
 
-def _is_running(name: str) -> bool:
-    """Check if a model is actually running on this machine."""
-    pid_file = RUN_DIR / name
-    if pid_file.exists():
-        content = pid_file.read_text().strip()
-        if len(content) >= 12 and content.isalnum():
-            return False  # vLLM container check skipped here; YAML port check below
-        try:
-            pid = int(content)
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, ValueError, OSError):
-            pass
-    yaml_path = CONF_DIR / f"{name}.yaml"
-    if yaml_path.exists():
-        try:
-            yaml_cfg = _load_yaml(yaml_path)
-            port = int(yaml_cfg.get("port", 0))
-        except (ValueError, TypeError):
-            port = 0
-        if port and port in _listening_ports():
-            return True
-    return False
+def _is_running(name: str, runtime: str = "llama") -> bool:
+    """Check if a model is actually running on this machine.
+
+    Delegates to ``system.checks._is_running`` — this module used to carry
+    its own diverged copy that unconditionally skipped the Docker container
+    check for vLLM-style pidfiles and fell straight to a port-liveness
+    check, which is wrong for any dual runtime (they conventionally share
+    port 8888, so it would mark every other dual recipe as "running" too
+    whenever any single one of them actually was).
+    """
+    return _checks_is_running(name, runtime)
 
 
 def gather_cluster_models(local_names: set[str]) -> list[dict]:
@@ -72,7 +59,7 @@ def gather_cluster_models(local_names: set[str]) -> list[dict]:
             # Only skip if the model is both known locally AND actually
             # running here — prevents filtering out remote models whose
             # YAML happens to exist locally (e.g. shared model configs).
-            if m.get("name") in local_names and _is_running(m.get("name")):
+            if m.get("name") in local_names and _is_running(m.get("name"), m.get("runtime", "llama")):
                 continue
             m["remote_host"] = host
             m["serve_host"] = serve_host

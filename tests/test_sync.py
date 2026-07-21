@@ -38,6 +38,23 @@ def _write_lmswitch_config(models_dir: Path, extra: dict = None):
     (models_dir.parent / ".lmswitch").write_text("".join(cfg_lines))
 
 
+def _mock_is_running(running_names):
+    """side_effect for lmswitch.sync._is_running, keyed by model NAME.
+
+    sync.py used to filter "is this model running" by checking its port
+    against a single global listening-ports set — broken for any dual
+    runtime, since every vllm-dual/vllm-dual-ray recipe conventionally
+    shares port 8888, so any one of them running made the raw port check
+    true for ALL of them (see tests/test_checks.py for the regression this
+    caused live: 13 dual recipes simultaneously showing "running" with
+    only one container actually up). sync.py now asks _is_running per
+    model by name instead. These tests express "which models are up" as a
+    set of names directly, in place of the old port set.
+    """
+    running = set(running_names)
+    return lambda name, runtime: name in running
+
+
 # ---------------------------------------------------------------------------
 # regen_opencode
 # ---------------------------------------------------------------------------
@@ -56,7 +73,8 @@ def test_regen_opencode_writes_providers():
         opencode_cfg.write_text("{}")
         export_cfg = tmp / "export.json"
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089, 8109, 8115}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b", "qwen3-vl-8b", "ornith-35b-q8"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", export_cfg), \
              mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
@@ -87,7 +105,8 @@ def test_regen_opencode_skips_non_running_models():
         opencode_cfg = tmp / "opencode.json"
         opencode_cfg.write_text("{}")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"running-model"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -109,7 +128,8 @@ def test_regen_opencode_idempotent():
         opencode_cfg = tmp / "opencode.json"
         opencode_cfg.write_text("{}")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -139,7 +159,8 @@ def test_regen_hermes_updates_primary_model():
             "  context_length: 4096\n"
         )
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089, 8109, 8115}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b", "qwen3-vl-8b", "ornith-35b-q8"})), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
              mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
@@ -166,7 +187,8 @@ def test_regen_hermes_registers_all_models_as_custom_providers():
         hermes_cfg = tmp / "hermes.yaml"
         hermes_cfg.write_text("model:\n  default: qwen3.6-35b\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8088, 8089, 8109}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b", "qwen3-vl-8b", "gemma-4-12b-it"})), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -196,7 +218,8 @@ def test_regen_hermes_custom_providers_drop_stopped_keep_foreign():
             "- name: gemma-4-12b-it\n  base_url: http://spark-8912.local:9999/v1\n"
         )
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
              mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
@@ -225,7 +248,8 @@ def test_regen_hermes_keeps_running_default_sticky():
             "  context_length: 262144\n"
         )
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8088, 8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b", "gemma-4-12b-it"})), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -247,7 +271,8 @@ def test_regen_hermes_skipped_when_disabled():
         hermes_cfg = tmp / "hermes.yaml"
         hermes_cfg.write_text("model:\n  default: old\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -264,7 +289,8 @@ def test_regen_hermes_skipped_when_config_missing():
 
         hermes_cfg = tmp / "nonexistent.yaml"
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -288,7 +314,8 @@ def test_regen_grok_adds_model_sections():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("[cli]\ninstaller = \"internal\"\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089, 8109, 8115}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b", "qwen3-vl-8b", "ornith-35b-q8"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -310,7 +337,8 @@ def test_regen_grok_preserves_existing_sections():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("[cli]\ninstaller = \"internal\"\n\n[analytics]\nenabled = true\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -332,7 +360,8 @@ def test_regen_grok_removes_old_model_sections():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("[model.old-model]\nmodel = \"old-model\"\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -353,7 +382,8 @@ def test_regen_grok_idempotent():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -371,7 +401,8 @@ def test_regen_grok_skipped_when_disabled():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -387,7 +418,8 @@ def test_regen_grok_skipped_when_parent_missing():
         _write_lmswitch_config(models_dir, {"SYNC_GROK": "true"})
         grok_cfg = tmp / "nonexistent" / "grok.toml"
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -455,7 +487,8 @@ def test_regen_all_calls_all_sync_functions():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("[cli]\ninstaller = \"internal\"\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
@@ -490,7 +523,8 @@ def test_regen_all_skips_disabled_targets():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
@@ -529,7 +563,8 @@ def test_cmd_on_calls_regen_all():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
@@ -566,7 +601,8 @@ def test_cmd_off_calls_regen_all():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text("[model.qwen3_6_35b]\nmodel = \"qwen3.6-35b\"\nbase_url = \"http://localhost:8089/v1\"\nname = \"Qwen3.6-35B\"\ncontext_window = 65536\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value=set()), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running(set())), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
@@ -598,7 +634,8 @@ def test_regen_grok_repairs_dangling_default():
             '[model.deepseek-v4-flash-dspark]\nmodel = "deepseek-v4-flash-dspark"\n'
         )
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -624,7 +661,8 @@ def test_regen_grok_keeps_default_while_serving():
             '[models]\ndefault = "ornith-35b-q8"\n'
         )
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089, 8115}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b", "ornith-35b-q8"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
              mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
@@ -662,7 +700,8 @@ def test_regen_opencode_includes_cluster_model():
         opencode_cfg = tmp / "opencode.json"
         opencode_cfg.write_text("{}")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
              mock.patch("lmswitch.sync.SPARK_HOST", "gigabyte.local"), \
@@ -692,7 +731,8 @@ def test_regen_hermes_registers_cluster_model_without_stealing_default():
         hermes_cfg = tmp / "hermes.yaml"
         hermes_cfg.write_text("model:\n  default: qwen3.6-35b\n")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.HERMES_CONFIG", hermes_cfg), \
              mock.patch("lmswitch.sync.SPARK_HOST", "gigabyte.local"), \
              mock.patch("lmswitch.sync._cluster_running_models",
@@ -722,7 +762,8 @@ def test_regen_grok_includes_cluster_model_with_host_tag():
         grok_cfg = tmp / "grok.toml"
         grok_cfg.write_text('[cli]\ninstaller = "internal"\n')
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.GROK_CONFIG", grok_cfg), \
              mock.patch("lmswitch.sync.SPARK_HOST", "gigabyte.local"), \
              mock.patch("lmswitch.sync._cluster_running_models",
@@ -750,7 +791,8 @@ def test_regen_all_targets_unaffected_when_peer_unreachable():
         opencode_cfg = tmp / "opencode.json"
         opencode_cfg.write_text("{}")
 
-        with mock.patch("lmswitch.sync._listening_ports", return_value={8089}), \
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
              mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
              mock.patch("lmswitch.sync.OPENCODE_EXPORT", tmp / "export.json"), \
              mock.patch("lmswitch.models.cluster._cluster_hosts", return_value=[]), \

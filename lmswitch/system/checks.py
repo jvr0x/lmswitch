@@ -34,6 +34,15 @@ def _docker_container(name: str) -> str | None:
         return None
 
 
+# Runtimes whose liveness is Docker-container-backed. Their pidfile (when
+# present) holds a container ID and is handled above; when the pidfile is
+# missing/stale, liveness must still be checked by container NAME, never
+# by port — every vllm-dual/vllm-dual-ray recipe conventionally shares
+# port 8888, so a port-based fallback would mark every OTHER dual recipe
+# as "running" the moment any single one of them actually is.
+_DOCKER_BACKED_RUNTIMES = ("vllm", "vllm-dual", "vllm-dual-ray")
+
+
 def _is_running(name: str, runtime: str) -> bool:
     pid_file = RUN_DIR / name
     if pid_file.exists():
@@ -48,6 +57,8 @@ def _is_running(name: str, runtime: str) -> bool:
             return True
         except (ProcessLookupError, ValueError, OSError):
             pass
+    if runtime in _DOCKER_BACKED_RUNTIMES:
+        return _docker_container(name) is not None
     yaml_path = CONF_DIR / f"{name}.yaml"
     if yaml_path.exists():
         try:
