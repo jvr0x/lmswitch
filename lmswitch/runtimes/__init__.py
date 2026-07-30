@@ -30,6 +30,7 @@ from lmswitch.system.memory import _memory_check
 from lmswitch.system import usage as usage_mod
 from lmswitch.runtimes.base import BaseRuntime, RunningState, runtime_registry
 from lmswitch.runtimes.llama import LlamaRuntime, _extra_args, _start_llama_direct
+from lmswitch.runtimes.llama_dual import LlamaDualRuntime
 from lmswitch.runtimes.vllm import VLLMRuntime, _vllm_args, _start_vllm_direct, _start_vllm_foreground
 from lmswitch.runtimes.vllm_dual import VLLMDualRuntime
 from lmswitch.runtimes.vllm_dual_ray import VLLMDualRayRuntime
@@ -51,6 +52,7 @@ __all__ = [
     "_start_systemd",
     "_memory_check",
     "LlamaRuntime",
+    "LlamaDualRuntime",
     "VLLMRuntime",
     "VLLMDualRuntime",
     "VLLMDualRayRuntime",
@@ -58,6 +60,7 @@ __all__ = [
 
 # Register runtimes — called at import time
 runtime_registry.register("llama", LlamaRuntime)
+runtime_registry.register("llama-dual", LlamaDualRuntime)
 runtime_registry.register("vllm", VLLMRuntime)
 runtime_registry.register("vllm-dual", VLLMDualRuntime)
 runtime_registry.register("vllm-dual-ray", VLLMDualRayRuntime)

@@ -33,7 +33,20 @@ def _extra_args(yaml: dict) -> list[str]:
 class LlamaRuntime(BaseRuntime):
     """gguf model runtime using llama-server."""
 
-    def start(self, name: str, yaml: dict) -> RunningState:
+    def _build_cmd(self, name: str, yaml: dict) -> tuple[list[str], Path]:
+        """Builds the llama-server argv and resolves the GGUF path.
+
+        Split out of ``start`` so runtimes that wrap llama-server (e.g.
+        ``llama-dual``, which appends RPC flags) can extend the command
+        without duplicating the option handling.
+
+        Args:
+            name: Model id (yaml filename stem), used as the default alias.
+            yaml: Parsed model config.
+
+        Returns:
+            ``(argv, model_path)``.
+        """
         models_dir = yaml.get("_models_dir")
         if models_dir is None:
             from lmswitch.system.io import _models_dir
@@ -68,6 +81,11 @@ class LlamaRuntime(BaseRuntime):
         if fit not in (None, "", "none", "skip"):
             cmd += ["-fit", str(fit)]
         cmd += _extra_args(yaml)
+        return cmd, model_path
+
+    def start(self, name: str, yaml: dict) -> RunningState:
+        port = yaml.get("port", 8081)
+        cmd, model_path = self._build_cmd(name, yaml)
 
         print(f"Starting llama-server {name} on port {port}...")
         print(f"  Model: {model_path}")

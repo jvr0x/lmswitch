@@ -138,7 +138,7 @@ def _filter_models(models: list[dict], view: str = "default",
     """
     out = []
     for m in models:
-        is_dual = m.get("runtime") in ("vllm-dual", "vllm-dual-ray") or m.get("type") == "dual"
+        is_dual = m.get("runtime") in ("vllm-dual", "vllm-dual-ray", "llama-dual") or m.get("type") == "dual"
         if view == "local" and (m.get("remote_host") or is_dual):
             continue
         if view == "dual" and not is_dual:
@@ -166,8 +166,12 @@ def render(models: list[dict]) -> None:
         # loaded. Treat local loaded GGUF weights as used — evicting them
         # would thrash inference. (vLLM CUDA allocations already show as used;
         # peers' models live in the other box's RAM.)
-        gguf_gib = sum(m["size"] for m in loaded
-                       if m["runtime"] == "llama"
+        # llama-dual counts only its local tensor_split share — the rest of
+        # the file is resident in the worker's rpc-server, not here.
+        from lmswitch.runtimes.llama_dual import local_share
+        gguf_gib = sum(m["size"] * (local_share(m) if m["runtime"] == "llama-dual" else 1.0)
+                       for m in loaded
+                       if m["runtime"] in ("llama", "llama-dual")
                        and not m.get("remote_host")) / 1024 ** 3
         used = min(used + gguf_gib, total)
         avail = max(avail - gguf_gib, 0.0)

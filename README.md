@@ -50,9 +50,10 @@ Running `lmswitch` (the same wordmark above greets you):
 
 - **One table for everything** — loaded (`●`) vs stopped (`○`), downloaded (`✓`)
   vs missing (`✗`), per-model size/port, and RAM / disk / loaded-count totals.
-- **Three runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM
-  in Docker, and `vllm-dual` for tensor-parallel serving across **two DGX
-  Sparks** over a CX7 link. Pick per model with `runtime:`.
+- **Four runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM
+  in Docker, and two ways to serve one model across **two DGX Sparks** over a
+  CX7 link: `vllm-dual` (tensor-parallel) and `llama-dual` (GGUF split over
+  llama.cpp RPC). Pick per model with `runtime:`.
 - **Cluster view (optional)** — with `CLUSTER_HOSTS` set, the table merges the
   other node's models with a HOST column (`spark` / `gigabyte` / `dual`) and
   toggling a peer's model delegates over SSH. Without it, nothing changes:
@@ -236,6 +237,42 @@ Set `enforce_eager: false` in dual YAMLs when the profile relies on cudagraph
 capture — the single-node default is eager. And stop local models first: a
 loaded model on either node shrinks vLLM's memory budget there. See
 [`examples/vllm-dual.yaml`](examples/vllm-dual.yaml).
+
+## Cluster mode: GGUF across two Sparks (`runtime: llama-dual`)
+
+Serves one GGUF split across both nodes with llama.cpp's RPC backend: this
+node runs `llama-server`, the peer runs `rpc-server` (started over SSH), and
+`--tensor-split` decides how many layers land on each. No containers, no
+NCCL. RDMA over the CX7 link is auto-negotiated when both llama.cpp builds
+have `-DGGML_RPC=ON -DGGML_RPC_RDMA=ON`.
+
+Weights live **once**, on this node: the head reads the GGUF and pushes the
+peer's share over the link, so nothing has to be copied or NFS-mounted. The
+peer caches what it receives (`rpc_cache`), so restarts skip the re-push.
+
+**llama-dual keys** (on top of the llama keys above):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `worker_host` | — | SSH alias of the peer node (passwordless) |
+| `worker_ip` | — | peer's CX7-link IP — the RPC endpoint |
+| `rpc_port` | `50052` | port `rpc-server` listens on |
+| `tensor_split` | even | share per device, e.g. `"0.45,0.55"` |
+| `rpc_cache` | `true` | peer caches received tensors under `~/.cache/llama.cpp/rpc` |
+| `rpc_threads` | — | peer's CPU threads (`rpc-server -t`) |
+| `worker_rpc_bin` | `~/utils/llama.cpp/build/bin/rpc-server` | binary on the peer |
+
+`tensor_split` follows llama-server's device order — local CUDA devices
+first, then one `RPC<n>` per `--rpc` endpoint. Confirm with `llama-server
+--list-devices --rpc <worker_ip>:<rpc_port>` after a llama.cpp upgrade;
+reversing it silently loads the wrong share onto the wrong box. Both nodes
+must run the **same llama.cpp commit**.
+
+Readiness waits on `/health`, not just the port: llama-server binds the port
+before loading and answers 503 meanwhile, which for a cross-node load is
+minutes of "ready" that isn't. `lmswitch off` kills the peer's `rpc-server`
+even when the head is already gone — a stranded one keeps its whole share
+resident.
 
 **Cluster visibility**: add `CLUSTER_HOSTS="<ssh-alias>"` (comma-separated)
 to `ai-models/.lmswitch` on each node. `lmswitch list` then merges the peers'

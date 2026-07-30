@@ -43,6 +43,16 @@ def _memory_check(name: str, yaml: dict) -> tuple[bool, str]:
         size, _present = _model_size_and_present(yaml.get("model", ""), runtime)
         need = size / 1024 ** 3 * 1.3
         what = f"~{need:.0f}Gi (weights + headroom)"
+        # Reason: llama-dual keeps only this node's tensor_split share
+        # resident — the rest is pushed to the worker's rpc-server — so the
+        # whole-file estimate would refuse every recipe this runtime exists
+        # for.
+        if runtime == "llama-dual":
+            from lmswitch.runtimes.llama_dual import local_share
+            share = local_share(yaml)
+            need = size / 1024 ** 3 * share * 1.3
+            what = (f"~{need:.0f}Gi (local {share:.0%} share of the "
+                    f"weights + headroom)")
     if avail < need:
         return False, f"{what}, but only {avail:.0f}Gi free"
     return True, ""

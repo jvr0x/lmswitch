@@ -22,7 +22,12 @@ from lmswitch.system.io import (
 # "vllm" here. The HOST column's "dual" label (see below) is what tells the
 # two-node story.
 _TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm", "vllm-dual-ray": "vllm"}
+# Sizing: these read a weights *directory* (or shared HF cache) per node.
 _DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray")
+# Topology: everything that serves one model across both nodes, including
+# llama-dual — which is still sized like any other GGUF, because its weights
+# are one local file set that the head pushes over RPC.
+_DUAL_HOST_RUNTIMES = _DUAL_RUNTIMES + ("llama-dual",)
 
 
 def load_models() -> list[dict]:
@@ -69,7 +74,10 @@ def load_models() -> list[dict]:
             "restart": env.get("restart"),
             "family": fam_label,
             "fam_order": fam_order,
-            "host": "dual" if runtime in _DUAL_RUNTIMES else local_host,
+            # Carried for llama-dual: the RAM row needs the local share to
+            # account only for what this node actually holds.
+            "tensor_split": env.get("tensor_split"),
+            "host": "dual" if runtime in _DUAL_HOST_RUNTIMES else local_host,
         })
     models.sort(key=lambda m: (m["fam_order"], m["name"]))
     return models
