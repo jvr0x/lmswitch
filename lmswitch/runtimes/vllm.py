@@ -59,6 +59,25 @@ def _env_args(yaml: dict) -> list[str]:
     return args
 
 
+def _shm_opts(yaml: dict) -> list[str]:
+    """Docker shm/locked-memory options for the vLLM container.
+
+    Defaults match the historical hardcoded ``--shm-size 8g`` (fine for most
+    recipes). Some models need more shared memory for FlashInfer JIT / large
+    batch tensors passed via /dev/shm — e.g. Laguna-S-2.1 + DFlash needed
+    32g + unlimited memlock + IPC_LOCK on a third-party recipe
+    (MiaAI-Lab/Laguna-S-2.1-DGX-Spark-RTX-6000-PRO) after hitting failures at
+    the 8g default. Opt in per-recipe:
+
+        shm_size: "32g"
+        ulimit_memlock: true   # adds --ulimit memlock=-1:-1 --cap-add=IPC_LOCK
+    """
+    args = ["--shm-size", str(yaml.get("shm_size", "8g"))]
+    if yaml.get("ulimit_memlock"):
+        args += ["--ulimit", "memlock=-1:-1", "--cap-add", "IPC_LOCK"]
+    return args
+
+
 def _entrypoint(yaml: dict) -> tuple[list[str], list[str]]:
     """Override the container ENTRYPOINT.
 
@@ -160,7 +179,7 @@ class VLLMRuntime(BaseRuntime):
             "--name", f"vllm-{name}",
             "--gpus", "all",
             "--network", "host",
-            "--shm-size", "8g",
+            *_shm_opts(yaml),
             "--log-driver", "json-file",
             "--log-opt", "max-size=10m",
             "--log-opt", "max-file=3",
@@ -282,7 +301,7 @@ def _start_vllm_foreground(name: str, yaml: dict) -> None:
         "--name", f"vllm-{name}",
         "--gpus", "all",
         "--network", "host",
-        "--shm-size", "8g",
+        *_shm_opts(yaml),
         "-v", f"{model_path}:{model_path}:ro",
         "-v", f"{HOME}/.cache/huggingface/hub:/root/.cache/huggingface/hub",
         "-v", f"{HOME}/.cache/huggingface/token:/root/.cache/huggingface/token",
