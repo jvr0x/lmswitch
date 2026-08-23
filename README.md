@@ -50,10 +50,10 @@ Running `lmswitch` (the same wordmark above greets you):
 
 - **One table for everything** — loaded (`●`) vs stopped (`○`), downloaded (`✓`)
   vs missing (`✗`), per-model size/port, and RAM / disk / loaded-count totals.
-- **Four runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM
-  in Docker, and two ways to serve one model across **two DGX Sparks** over a
-  CX7 link: `vllm-dual` (tensor-parallel) and `llama-dual` (GGUF split over
-  llama.cpp RPC). Pick per model with `runtime:`.
+- **Five runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM
+  in Docker, SGLang in Docker (`sglang`), and two ways to serve one model across
+  **two DGX Sparks** over a CX7 link: `vllm-dual` (tensor-parallel) and
+  `llama-dual` (GGUF split over llama.cpp RPC). Pick per model with `runtime:`.
 - **Cluster view (optional)** — with `CLUSTER_HOSTS` set, the table merges the
   other node's models with a HOST column (`spark` / `gigabyte` / `dual`) and
   toggling a peer's model delegates over SSH. Without it, nothing changes:
@@ -183,7 +183,7 @@ your models directory**. Fully-commented templates live in
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `runtime` | `llama` | `llama` (GGUF) or `vllm` (Docker) |
+| `runtime` | `llama` | `llama` (GGUF), `vllm` (Docker) or `sglang` (Docker) |
 | `model` | — | path to the `.gguf` file (llama) or model dir (vLLM), relative to the models dir |
 | `port` | `8081` | OpenAI-compatible server port |
 | `ctx` | `65536` | context length |
@@ -201,6 +201,18 @@ older llama.cpp builds that don't support `-fit`.
 **vLLM keys**: `gpu_memory_utilization` (0.15), `image`, `tool_call_parser`,
 `reasoning_parser`, `trust_remote_code`, `max_num_seqs`, `extra_args`, and more
 — see [`examples/vllm.yaml`](examples/vllm.yaml) for the full list.
+
+**SGLang keys**: `mem_fraction_static` (0.95 — a hard up-front reservation, so
+the RAM guard sizes the model from it, not from the weights), `image`,
+`attention_backend`, `chunked_prefill_size`, `disable_prefill_cuda_graph`
+(true), `kv_cache_dtype`, `tp_size`, `max_running_requests`,
+`tool_call_parser`, `reasoning_parser`, `sampling_defaults`, `cpuset`
+(`5-9,15-19` — GB10's performance cores; `""` to disable pinning), `shm_size`
+(32g), `json_model_override_args`, plus the shared `extra_mounts` / `env` /
+`extra_args`. Containers are named `sglang-<id>`. A `ctx` above the model's
+native 262144 also needs a YaRN rope override in `json_model_override_args`, or
+SGLang silently clamps back down. See
+[`ai-models/qwen3.8-27b-nvfp4-sglang.yaml`](ai-models/qwen3.8-27b-nvfp4-sglang.yaml).
 
 ## Cluster mode: two Sparks (`runtime: vllm-dual`)
 
@@ -379,6 +391,7 @@ lmswitch/
 │   ├── base.py          #   BaseRuntime ABC + RuntimeRegistry
 │   ├── llama.py         #   GGUF via llama-server (detached background process)
 │   ├── vllm.py          #   vLLM via Docker
+│   ├── sglang.py        #   SGLang via Docker
 │   ├── systemd.py       #   restart: on-failure → systemd user unit
 │   └── wait.py          #   readiness polling
 └── system/

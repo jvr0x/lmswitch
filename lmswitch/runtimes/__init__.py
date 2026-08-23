@@ -34,6 +34,8 @@ from lmswitch.runtimes.llama_dual import LlamaDualRuntime
 from lmswitch.runtimes.vllm import VLLMRuntime, _vllm_args, _start_vllm_direct, _start_vllm_foreground
 from lmswitch.runtimes.vllm_dual import VLLMDualRuntime
 from lmswitch.runtimes.vllm_dual_ray import VLLMDualRayRuntime
+from lmswitch.runtimes.sglang import SGLangRuntime
+from lmswitch.runtimes.dual_serve import _start_dual_foreground
 from lmswitch.runtimes.systemd import _start_systemd
 from lmswitch.runtimes.wait import _wait_ready
 
@@ -49,6 +51,7 @@ __all__ = [
     "_start_llama_direct",
     "_start_vllm_direct",
     "_start_vllm_foreground",
+    "_start_dual_foreground",
     "_start_systemd",
     "_memory_check",
     "LlamaRuntime",
@@ -56,6 +59,7 @@ __all__ = [
     "VLLMRuntime",
     "VLLMDualRuntime",
     "VLLMDualRayRuntime",
+    "SGLangRuntime",
 ]
 
 # Register runtimes — called at import time
@@ -64,6 +68,7 @@ runtime_registry.register("llama-dual", LlamaDualRuntime)
 runtime_registry.register("vllm", VLLMRuntime)
 runtime_registry.register("vllm-dual", VLLMDualRuntime)
 runtime_registry.register("vllm-dual-ray", VLLMDualRayRuntime)
+runtime_registry.register("sglang", SGLangRuntime)
 
 
 def start_model(name: str, yaml: dict) -> None:

@@ -23,10 +23,36 @@ def _listening_ports() -> set[int]:
     return ports
 
 
-def _docker_container(name: str) -> str | None:
+# Container name prefix per Docker-backed runtime. Every vLLM recipe is
+# named ``vllm-<model>``; sglang gets its own namespace so the same model
+# wired for both backends never collides on a container name.
+_CONTAINER_PREFIX = {"sglang": "sglang"}
+
+
+def _container_prefix(runtime: str) -> str:
+    """Returns the docker container name prefix used by *runtime*.
+
+    Args:
+        runtime: Runtime type string (e.g. ``"vllm"``, ``"sglang"``).
+
+    Returns:
+        The prefix, defaulting to ``"vllm"`` for every runtime that predates
+        this mapping.
+    """
+    return _CONTAINER_PREFIX.get(runtime, "vllm")
+
+
+def _docker_container(name: str, prefix: str = "vllm") -> str | None:
+    """Returns the running container ID for *name*, or None.
+
+    Args:
+        name: Model name (the yaml stem).
+        prefix: Container name prefix — see ``_container_prefix``. Defaults
+            to ``"vllm"`` so every pre-existing caller is unchanged.
+    """
     try:
         out = subprocess.check_output(
-            ["docker", "ps", "--filter", f"name=^/vllm-{name}$", "--format", "{{.ID}}"],
+            ["docker", "ps", "--filter", f"name=^/{prefix}-{name}$", "--format", "{{.ID}}"],
             text=True, stderr=subprocess.DEVNULL
         ).strip()
         return out or None
@@ -40,16 +66,17 @@ def _docker_container(name: str) -> str | None:
 # by port — every vllm-dual/vllm-dual-ray recipe conventionally shares
 # port 8888, so a port-based fallback would mark every OTHER dual recipe
 # as "running" the moment any single one of them actually is.
-_DOCKER_BACKED_RUNTIMES = ("vllm", "vllm-dual", "vllm-dual-ray")
+_DOCKER_BACKED_RUNTIMES = ("vllm", "vllm-dual", "vllm-dual-ray", "sglang")
 
 
 def _is_running(name: str, runtime: str) -> bool:
+    prefix = _container_prefix(runtime)
     pid_file = RUN_DIR / name
     if pid_file.exists():
         content = pid_file.read_text().strip()
         # vLLM: container ID (hex string, 12+ chars) → check Docker
         if len(content) >= 12 and content.isalnum():
-            return _docker_container(name) is not None
+            return _docker_container(name, prefix) is not None
         # GGUF: PID (numeric) → check process
         try:
             pid = int(content)
@@ -58,7 +85,7 @@ def _is_running(name: str, runtime: str) -> bool:
         except (ProcessLookupError, ValueError, OSError):
             pass
     if runtime in _DOCKER_BACKED_RUNTIMES:
-        return _docker_container(name) is not None
+        return _docker_container(name, prefix) is not None
     yaml_path = CONF_DIR / f"{name}.yaml"
     if yaml_path.exists():
         try:

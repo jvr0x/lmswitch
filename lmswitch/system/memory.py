@@ -29,6 +29,20 @@ def _memory_check(name: str, yaml: dict) -> tuple[bool, str]:
         return True, ""  # Can't measure (non-Linux); don't block.
     total, _used, avail = ram
     runtime = yaml.get("runtime", "llama")
+    # Reason: SGLang pre-allocates a static fraction of memory up front
+    # (--mem-fraction-static, 0.95 in the DGX Spark recipe) exactly like
+    # vLLM's gpu_memory_utilization — sizing it from the weights instead
+    # would wave through a start that grabs ~121Gi of a 128Gi box and
+    # hard-resets it.
+    if runtime == "sglang":
+        try:
+            frac = float(yaml.get("mem_fraction_static", 0.95))
+        except (ValueError, TypeError):
+            frac = 0.95
+        need = frac * total
+        what = f"SGLang reserves ~{need:.0f}Gi (mem_fraction_static={frac})"
+        return (avail >= need, "" if avail >= need
+                else f"{what}, but only {avail:.0f}Gi free")
     # Reason: dual runtimes reserve gpu_memory_utilization on THIS node too
     # (each node holds its TP shard), so the same estimate applies per-node.
     if runtime in ("vllm", "vllm-dual", "vllm-dual-ray"):

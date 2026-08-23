@@ -40,6 +40,7 @@ from lmswitch.runtimes import (
     _start_llama_direct,
     _start_vllm_direct,
     _start_vllm_foreground,
+    _start_dual_foreground,
     _start_systemd,
 )
 from lmswitch.sync import regen_opencode, regen_hermes, regen_grok, regen_all
@@ -482,6 +483,11 @@ def cmd_serve(name: str) -> None:
     runtime = yaml.get("runtime", "llama")
     if runtime == "vllm":
         _start_vllm_foreground(name, yaml)
+    elif runtime in ("vllm-dual", "vllm-dual-ray"):
+        # Both ranks are detached containers, so there is no child process to
+        # poll — dual_serve blocks on the head container instead and tears the
+        # worker down on every exit path.
+        _start_dual_foreground(name, yaml)
     else:
         state = _start_llama_direct(name, yaml)
         if state.status != "ready":

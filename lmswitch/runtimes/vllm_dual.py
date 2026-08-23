@@ -28,7 +28,9 @@ for a second asset needing a different host path per node — same asymmetry
 as model_path/worker_model_path, e.g. a speculative-decode drafter
 checkpoint), ``extra_args``, ``entrypoint``, ``gpu_memory_utilization``
 (0.80), ``ctx``, ``max_num_seqs`` (6), ``ready_timeout`` (1800 — TP=2 loads
-take a while).
+take a while), ``restart`` + ``gate_timeout`` (600 — how long
+``lmswitch serve`` waits at boot for dockerd, the weights mount and the
+peer's sshd; see runtimes/dual_serve.py).
 """
 
 from __future__ import annotations

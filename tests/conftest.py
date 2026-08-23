@@ -28,12 +28,16 @@ def _patch_conf_dir(data_root: Path) -> None:
     import lmswitch.runtimes as rt_mod
     import lmswitch.runtimes.llama as llama_mod
     import lmswitch.runtimes.vllm as vllm_mod
+    import lmswitch.runtimes.sglang as sglang_mod
     import lmswitch.runtimes.vllm_dual as vllm_dual_mod
 
-    for mod in (io_mod, cli_mod, loader_mod, sync_mod, rt_mod, llama_mod, vllm_mod):
+    for mod in (io_mod, cli_mod, loader_mod, sync_mod, rt_mod, llama_mod, vllm_mod,
+                sglang_mod):
         mod.CONF_DIR = data_root
         mod.RUN_DIR = data_root / "running"
         mod.CONFIG_FILE = data_root / ".lmswitch"
+    # sglang and vllm_dual only import RUN_DIR (sglang has no CONF_DIR use,
+    # but the loop above sets it harmlessly).
     # vllm_dual only imports RUN_DIR.
     vllm_dual_mod.RUN_DIR = data_root / "running"
 

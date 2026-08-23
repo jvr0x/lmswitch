@@ -21,7 +21,8 @@ from lmswitch.system.io import (
 # are both vLLM running across two nodes (mp vs Ray executor), so both show
 # "vllm" here. The HOST column's "dual" label (see below) is what tells the
 # two-node story.
-_TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm", "vllm-dual-ray": "vllm"}
+_TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm", "vllm-dual-ray": "vllm",
+                    "sglang": "sglang"}
 # Sizing: these read a weights *directory* (or shared HF cache) per node.
 _DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray")
 # Topology: everything that serves one model across both nodes, including
