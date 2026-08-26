@@ -139,7 +139,8 @@ def _filter_models(models: list[dict], view: str = "default",
     """
     out = []
     for m in models:
-        is_dual = m.get("runtime") in ("vllm-dual", "vllm-dual-ray", "llama-dual") or m.get("type") == "dual"
+        is_dual = m.get("runtime") in ("vllm-dual", "vllm-dual-ray", "sglang-dual",
+                                       "llama-dual") or m.get("type") == "dual"
         if view == "local" and (m.get("remote_host") or is_dual):
             continue
         if view == "dual" and not is_dual:
@@ -483,7 +484,7 @@ def cmd_serve(name: str) -> None:
     runtime = yaml.get("runtime", "llama")
     if runtime == "vllm":
         _start_vllm_foreground(name, yaml)
-    elif runtime in ("vllm-dual", "vllm-dual-ray"):
+    elif runtime in ("vllm-dual", "vllm-dual-ray", "sglang-dual"):
         # Both ranks are detached containers, so there is no child process to
         # poll — dual_serve blocks on the head container instead and tears the
         # worker down on every exit path.

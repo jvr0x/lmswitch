@@ -34,7 +34,7 @@ def _memory_check(name: str, yaml: dict) -> tuple[bool, str]:
     # vLLM's gpu_memory_utilization — sizing it from the weights instead
     # would wave through a start that grabs ~121Gi of a 128Gi box and
     # hard-resets it.
-    if runtime == "sglang":
+    if runtime in ("sglang", "sglang-dual"):
         try:
             frac = float(yaml.get("mem_fraction_static", 0.95))
         except (ValueError, TypeError):

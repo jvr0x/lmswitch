@@ -26,7 +26,7 @@ def _listening_ports() -> set[int]:
 # Container name prefix per Docker-backed runtime. Every vLLM recipe is
 # named ``vllm-<model>``; sglang gets its own namespace so the same model
 # wired for both backends never collides on a container name.
-_CONTAINER_PREFIX = {"sglang": "sglang"}
+_CONTAINER_PREFIX = {"sglang": "sglang", "sglang-dual": "sglang"}
 
 
 def _container_prefix(runtime: str) -> str:
@@ -66,7 +66,8 @@ def _docker_container(name: str, prefix: str = "vllm") -> str | None:
 # by port — every vllm-dual/vllm-dual-ray recipe conventionally shares
 # port 8888, so a port-based fallback would mark every OTHER dual recipe
 # as "running" the moment any single one of them actually is.
-_DOCKER_BACKED_RUNTIMES = ("vllm", "vllm-dual", "vllm-dual-ray", "sglang")
+_DOCKER_BACKED_RUNTIMES = ("vllm", "vllm-dual", "vllm-dual-ray", "sglang",
+                           "sglang-dual")
 
 
 def _is_running(name: str, runtime: str) -> bool:

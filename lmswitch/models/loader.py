@@ -22,9 +22,9 @@ from lmswitch.system.io import (
 # "vllm" here. The HOST column's "dual" label (see below) is what tells the
 # two-node story.
 _TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm", "vllm-dual-ray": "vllm",
-                    "sglang": "sglang"}
+                    "sglang": "sglang", "sglang-dual": "sglang"}
 # Sizing: these read a weights *directory* (or shared HF cache) per node.
-_DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray")
+_DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray", "sglang-dual")
 # Topology: everything that serves one model across both nodes, including
 # llama-dual — which is still sized like any other GGUF, because its weights
 # are one local file set that the head pushes over RPC.

@@ -50,10 +50,11 @@ Running `lmswitch` (the same wordmark above greets you):
 
 - **One table for everything** — loaded (`●`) vs stopped (`○`), downloaded (`✓`)
   vs missing (`✗`), per-model size/port, and RAM / disk / loaded-count totals.
-- **Five runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM
-  in Docker, SGLang in Docker (`sglang`), and two ways to serve one model across
-  **two DGX Sparks** over a CX7 link: `vllm-dual` (tensor-parallel) and
-  `llama-dual` (GGUF split over llama.cpp RPC). Pick per model with `runtime:`.
+- **Six runtimes** — GGUF via `llama-server`, safetensors/quantized via vLLM
+  in Docker, SGLang in Docker (`sglang`), and three ways to serve one model
+  across **two DGX Sparks** over a CX7 link: `vllm-dual` and `sglang-dual`
+  (both tensor-parallel) and `llama-dual` (GGUF split over llama.cpp RPC).
+  Pick per model with `runtime:`.
 - **Cluster view (optional)** — with `CLUSTER_HOSTS` set, the table merges the
   other node's models with a HOST column (`spark` / `gigabyte` / `dual`) and
   toggling a peer's model delegates over SSH. Without it, nothing changes:
@@ -183,7 +184,7 @@ your models directory**. Fully-commented templates live in
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `runtime` | `llama` | `llama` (GGUF), `vllm` (Docker) or `sglang` (Docker) |
+| `runtime` | `llama` | `llama` (GGUF), `vllm` (Docker), `sglang` (Docker), or the two-node `vllm-dual` / `sglang-dual` / `llama-dual` |
 | `model` | — | path to the `.gguf` file (llama) or model dir (vLLM), relative to the models dir |
 | `port` | `8081` | OpenAI-compatible server port |
 | `ctx` | `65536` | context length |
@@ -213,6 +214,18 @@ the RAM guard sizes the model from it, not from the weights), `image`,
 native 262144 also needs a YaRN rope override in `json_model_override_args`, or
 SGLang silently clamps back down. See
 [`ai-models/qwen3.8-27b-nvfp4-sglang.yaml`](ai-models/qwen3.8-27b-nvfp4-sglang.yaml).
+
+**`sglang-dual` keys**: every SGLang key above, plus the two-node set shared
+with `vllm-dual` — `model_path` (this node) / `worker_model_path` (the peer's
+path to the same weights; both are bound at `/model` inside the container so
+`--model-path` is one string), `worker_host`, `master_addr`, `worker_ip`,
+`master_port` (25000), `tp_size` (2), `worker_env`, `head_extra_mounts` /
+`worker_extra_mounts`, `ready_timeout` (2400). It launches
+`sglang.launch_server --nnodes 2 --node-rank N --dist-init-addr HOST:PORT` on
+both ranks; only rank 0 binds the API. Use it when a checkpoint simply does not
+fit one node — SGLang cannot offload, so a 125.9 GiB checkpoint on a 121 GiB
+box only serves sharded. See
+[`ai-models/qwen3.8-flash-next-nvfp4-dual.yaml`](ai-models/qwen3.8-flash-next-nvfp4-dual.yaml).
 
 ## Cluster mode: two Sparks (`runtime: vllm-dual`)
 
@@ -392,6 +405,7 @@ lmswitch/
 │   ├── llama.py         #   GGUF via llama-server (detached background process)
 │   ├── vllm.py          #   vLLM via Docker
 │   ├── sglang.py        #   SGLang via Docker
+│   ├── sglang_dual.py   #   SGLang TP=2 across two nodes (head + ssh worker)
 │   ├── systemd.py       #   restart: on-failure → systemd user unit
 │   └── wait.py          #   readiness polling
 └── system/

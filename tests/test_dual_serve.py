@@ -58,8 +58,11 @@ def _install(monkeypatch, runtime, gate=None, containers=None):
         monkeypatch.setattr(ds_mod, "_gate", gate)
     if containers is not None:
         seq = list(containers)
+        # Takes the prefix too: sglang-dual's containers are named
+        # ``sglang-<id>``, so probing under the default ``vllm-`` prefix would
+        # report a live head as gone and tear the pair down on the first poll.
         monkeypatch.setattr(ds_mod, "_docker_container",
-                            lambda _n: seq.pop(0) if seq else None)
+                            lambda _n, _p="vllm": seq.pop(0) if seq else None)
     monkeypatch.setattr(ds_mod.time, "sleep", lambda _s: None)
     monkeypatch.setattr(ds_mod, "_memory_check", lambda _n, _y: (True, ""))
 
@@ -98,6 +101,40 @@ def test_cmd_serve_routes_dual_runtimes(monkeypatch, lmswitch_data_dir):
 
     cli_mod.cmd_serve("d")
     assert calls == ["d"]
+
+
+def test_cmd_serve_routes_sglang_dual(monkeypatch, lmswitch_data_dir):
+    """sglang-dual is a two-node runtime too — the llama path would try to boot
+    llama-server against a TP=2 safetensors recipe."""
+    (cli_mod.CONF_DIR / "s.yaml").write_text(
+        "runtime: sglang-dual\nimage: img:test\nmodel_path: /nonexistent\n"
+        "port: 8888\nworker_host: Gigabyte\nmaster_addr: 10.0.0.1\n")
+    calls = []
+    monkeypatch.setattr(cli_mod, "_start_dual_foreground",
+                        lambda name, yaml: calls.append(name))
+    monkeypatch.setattr(cli_mod, "_start_llama_direct",
+                        lambda *a, **k: pytest.fail("llama path must not run"))
+
+    cli_mod.cmd_serve("s")
+    assert calls == ["s"]
+
+
+def test_head_probe_uses_the_runtimes_container_prefix(monkeypatch):
+    """The head-liveness poll must probe ``sglang-<id>`` for sglang-dual. Under
+    the default ``vllm-`` prefix a healthy head reads as gone, and the
+    supervisor tears the pair down on its first poll."""
+    seen = []
+    rt = _FakeRuntime("ready")
+    monkeypatch.setattr(ds_mod.runtime_registry, "lookup", lambda _n: (lambda: rt))
+    monkeypatch.setattr(ds_mod, "_gate", lambda *a, **k: None)
+    monkeypatch.setattr(ds_mod.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(ds_mod, "_memory_check", lambda _n, _y: (True, ""))
+    monkeypatch.setattr(ds_mod, "_docker_container",
+                        lambda n, p="vllm": seen.append(p) or None)
+
+    with pytest.raises(SystemExit):
+        ds_mod._start_dual_foreground("m", {**DUAL_YAML, "runtime": "sglang-dual"})
+    assert seen == ["sglang"]
 
 
 def test_dual_unit_disables_start_rate_limit_and_logs():

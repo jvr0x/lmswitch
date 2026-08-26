@@ -31,7 +31,7 @@ import sys
 import time
 
 from lmswitch.runtimes.base import runtime_registry
-from lmswitch.system.checks import _docker_container
+from lmswitch.system.checks import _container_prefix, _docker_container
 from lmswitch.system.memory import _memory_check
 
 
@@ -144,7 +144,7 @@ def _start_dual_foreground(name: str, yaml: dict, poll_interval: int = 5) -> Non
 
     while True:
         time.sleep(poll_interval)
-        if _docker_container(name) is None:
+        if _docker_container(name, _container_prefix(runtime_name)) is None:
             runtime.stop(name, yaml)
             sys.exit(f"{name} head container exited; "
                      f"handing back to systemd for restart")
