@@ -162,6 +162,8 @@ lmswitch off <name|#>     # stop a model
 lmswitch sync             # regenerate enabled configs from currently-serving models
 lmswitch add  <name>      # create a model config interactively
 lmswitch serve <name>     # run a model in the foreground (used by systemd)
+lmswitch stats            # usage: starts/stops, uptime, tokens in/out per model
+lmswitch stats-clear      # wipe the recorded usage history
 lmswitch init             # bootstrap ai-models/, .lmswitch, and sync targets
 lmswitch -h, --help       # show help
 lmswitch -v, --version    # print the version
@@ -340,6 +342,13 @@ first shard.
   it answers (`Ready on port <port>`), the process/container dies
   (`✗ … exited during startup` + a pointer to the log / `docker logs`), or
   `ready_timeout` elapses (`WARNING`).
+- **Token accounting** → on every `off`, lmswitch scrapes the server's
+  Prometheus counters (`llamacpp:` / `vllm:` / `sglang:` `…_tokens_total` on
+  `/metrics`) and its real process uptime *before* the kill, and appends them
+  to `ai-models/lmswitch-usage.json` for `lmswitch stats`. `--metrics`
+  (llama.cpp) and `--enable-metrics` (SGLang) are added to the launch command
+  automatically — vLLM serves them by default. Counters are per server
+  *process*, so they reset whenever it restarts.
 - **RAM guard** → before launching, free RAM (`MemAvailable` from `/proc/meminfo`)
   is compared to an estimate: `gpu_memory_utilization × total` for vLLM, on-disk
   weight size × 1.3 for GGUF. If short, the start is refused unless `force: true`.

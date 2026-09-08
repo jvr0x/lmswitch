@@ -80,7 +80,14 @@ class LlamaRuntime(BaseRuntime):
         fit = yaml.get("fit", "off")
         if fit not in (None, "", "none", "skip"):
             cmd += ["-fit", str(fit)]
-        cmd += _extra_args(yaml)
+        extra = _extra_args(yaml)
+        # Reason: llama.cpp serves /metrics only when started with --metrics,
+        # and that endpoint is where `lmswitch stats` reads its token counters
+        # from. Appended before extra_args so a recipe keeps the last word
+        # (llama.cpp's parser is last-wins).
+        if "--metrics" not in extra:
+            cmd.append("--metrics")
+        cmd += extra
         return cmd, model_path
 
     def start(self, name: str, yaml: dict) -> RunningState:

@@ -378,15 +378,16 @@ def test_start_model_hooks_record_start():
 
 
 def test_stop_model_hooks_record_stop():
-    """stop_model() calls record_stop."""
+    """stop_model() records the values sampled off the live server."""
     from lmswitch.runtimes import stop_model
     from lmswitch.system import usage as usage_mod
 
-    with mock.patch.object(usage_mod, "record_stop") as mock_rec:
-        with mock.patch("lmswitch.runtimes.runtime_registry"):
-            stop_model("test-model", "llama")
+    with mock.patch.object(usage_mod, "sample_server", return_value=(612.5, 4000, 900, 8081)):
+        with mock.patch.object(usage_mod, "record_stop") as mock_rec:
+            with mock.patch("lmswitch.runtimes.runtime_registry"):
+                stop_model("test-model", "llama")
 
-    mock_rec.assert_called_once_with("test-model", 0.0)
+    mock_rec.assert_called_once_with("test-model", 612.5, 4000, 900, 8081)
 
 
 # ---------------------------------------------------------------------------
@@ -530,3 +531,158 @@ def test_full_pipeline():
 
     # Cleanup
     usage_mod.clear_events()
+
+
+# ---------------------------------------------------------------------------
+# sample_server — the pre-stop read
+#
+# Token counters and uptime both live inside the server process. Sampling them
+# after the kill is what made every recorded stop read 0 tokens / 0 seconds,
+# so the ordering below is the actual regression under test.
+# ---------------------------------------------------------------------------
+
+def test_sample_server_reads_uptime_and_counters():
+    """sample_server pairs the scraped counters with the real uptime."""
+    from lmswitch.system import usage as usage_mod
+
+    with mock.patch("lmswitch.system.checks.server_uptime", return_value=1800.0), \
+         mock.patch("lmswitch.system.metrics.fetch_token_counters",
+                    return_value=(3675428, 44995)) as mock_fetch:
+        sample = usage_mod.sample_server("qwen", "vllm-dual", {"port": 8888})
+
+    assert sample == (1800.0, 3675428, 44995, 8888)
+    mock_fetch.assert_called_once_with(8888, "vllm-dual")
+
+
+def test_sample_server_without_a_port_scrapes_nothing():
+    """A recipe with no port yields zeros rather than a bogus scrape."""
+    from lmswitch.system import usage as usage_mod
+
+    with mock.patch("lmswitch.system.checks.server_uptime", return_value=0.0):
+        assert usage_mod.sample_server("qwen", "llama", {}) == (0.0, 0, 0, 0)
+
+
+def test_sample_server_with_an_unparsable_port_is_zero():
+    """A malformed `port:` must not raise on the way out of a stop."""
+    from lmswitch.system import usage as usage_mod
+
+    with mock.patch("lmswitch.system.checks.server_uptime", return_value=0.0):
+        assert usage_mod.sample_server("qwen", "llama", {"port": "eighty-eighty"}) == (0.0, 0, 0, 0)
+
+
+def test_stop_model_samples_before_it_kills_the_server():
+    """The scrape must happen while the server is still answering."""
+    from lmswitch.runtimes import stop_model
+    from lmswitch.system import usage as usage_mod
+
+    order: list[str] = []
+
+    class _Runtime:
+        def stop(self, name, yaml):
+            order.append("stop")
+
+    def _sample(*args):
+        order.append("sample")
+        return (100.0, 10, 20, 8081)
+
+    with mock.patch.object(usage_mod, "sample_server", side_effect=_sample), \
+         mock.patch.object(usage_mod, "record_stop",
+                           side_effect=lambda *a: order.append("record")), \
+         mock.patch("lmswitch.runtimes.runtime_registry") as mock_reg:
+        mock_reg.lookup.return_value = _Runtime
+        stop_model("test-model", "llama")
+
+    assert order == ["sample", "stop", "record"]
+
+
+def test_recorded_stop_carries_the_token_counts():
+    """A full start/stop cycle lands real numbers in the JSONL."""
+    from lmswitch.system import usage as usage_mod
+
+    usage_mod._START_CACHE.clear()
+    usage_mod.clear_events()
+    usage_mod.record_start("qwen", _make_model_cfg("qwen", "vllm", 8888))
+    usage_mod.record_stop("qwen", 1800.0, 3675428, 44995, 8888)
+
+    stop_ev = usage_mod.query_events(action="stop")[-1]
+    assert stop_ev["duration"] == 1800.0
+    assert stop_ev["prompt_tokens"] == 3675428
+    assert stop_ev["generation_tokens"] == 44995
+    assert stop_ev["total_tokens"] == 3720423
+
+
+def test_cmd_off_records_a_stop_for_systemd_managed_models():
+    """`restart:` recipes bypass stop_model, and used to log no stop at all."""
+    import lmswitch.cli as cli_mod
+    from lmswitch.system import usage as usage_mod
+
+    (cli_mod.CONF_DIR / "always-on.yaml").write_text(
+        "runtime: llama\nmodel: a/b.gguf\nport: 8089\nrestart: always\n"
+    )
+
+    order: list[str] = []
+
+    def _sample(*args):
+        order.append("sample")
+        return (90000.0, 12345, 678, 8089)
+
+    with mock.patch.object(usage_mod, "sample_server", side_effect=_sample), \
+         mock.patch.object(usage_mod, "record_stop") as mock_rec, \
+         mock.patch.object(cli_mod.subprocess, "run",
+                           side_effect=lambda *a, **k: order.append("systemctl")), \
+         mock.patch.object(cli_mod, "regen_all"):
+        cli_mod.cmd_off("always-on")
+
+    assert order == ["sample", "systemctl"]
+    mock_rec.assert_called_once_with("always-on", 90000.0, 12345, 678, 8089)
+
+
+def test_toggle_records_a_stop_for_systemd_managed_models():
+    """The interactive toggle takes the same systemd bypass as cmd_off."""
+    import lmswitch.cli as cli_mod
+    from lmswitch.system import usage as usage_mod
+
+    (cli_mod.CONF_DIR / "always-on.yaml").write_text(
+        "runtime: llama\nmodel: a/b.gguf\nport: 8089\nrestart: always\n"
+    )
+
+    order: list[str] = []
+
+    def _sample(*args):
+        order.append("sample")
+        return (90000.0, 12345, 678, 8089)
+
+    with mock.patch.object(usage_mod, "sample_server", side_effect=_sample), \
+         mock.patch.object(usage_mod, "record_stop") as mock_rec, \
+         mock.patch.object(cli_mod.subprocess, "run",
+                           side_effect=lambda *a, **k: order.append("systemctl")), \
+         mock.patch.object(cli_mod, "regen_all"):
+        cli_mod.toggle("always-on", "off")
+
+    assert order == ["sample", "systemctl"]
+    mock_rec.assert_called_once_with("always-on", 90000.0, 12345, 678, 8089)
+
+
+def test_recorded_port_falls_back_to_the_sampled_one():
+    """A stop with no prior start still records the port it served on."""
+    from lmswitch.system import usage as usage_mod
+
+    usage_mod._START_CACHE.clear()
+    usage_mod.clear_events()
+    usage_mod.record_stop("orphan", 5.0, 1, 2, 8089)
+
+    stop_ev = usage_mod.query_events(action="stop")[-1]
+    assert stop_ev["port"] == 8089
+
+
+def test_the_start_events_port_wins_when_there_is_one():
+    """The recorded port stays the configured one, not the caller's guess."""
+    from lmswitch.system import usage as usage_mod
+
+    usage_mod._START_CACHE.clear()
+    usage_mod.clear_events()
+    usage_mod.record_start("qwen", _make_model_cfg("qwen", "llama", 8081))
+    usage_mod.record_stop("qwen", 5.0, 1, 2, 9999)
+
+    stop_ev = usage_mod.query_events(action="stop")[-1]
+    assert stop_ev["port"] == 8081

@@ -105,6 +105,10 @@ def stop_model(name: str, runtime: str) -> None:
     yaml_path = CONF_DIR / f"{name}.yaml"
     if yaml_path.exists():
         yaml = _load_yaml(yaml_path) or {}
+    # Reason: uptime and the cumulative token counters both live inside the
+    # server process, so they have to be read while it is still up — after the
+    # kill there is nothing left to ask.
+    sample = usage_mod.sample_server(name, runtime, yaml)
     runtime_cls = runtime_registry.lookup(runtime)
     runtime_cls().stop(name, yaml)
-    usage_mod.record_stop(name, 0.0)
+    usage_mod.record_stop(name, *sample)

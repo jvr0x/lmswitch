@@ -184,3 +184,34 @@ def test_failed_docker_run_reports_dead_without_waiting():
     run_i = next(i for i, c in enumerate(calls) if c[:2] == ["docker", "run"])
     rm_i = next(i for i, c in enumerate(calls) if c[:3] == ["docker", "container", "rm"])
     assert rm_i < run_i, "stale container must be cleared before docker run"
+
+
+# ---------------------------------------------------------------------------
+# --enable-metrics — SGLang's counterpart to llama's --metrics.
+#
+# Expected use: a plain recipe gets the flag. Edge: a recipe already setting it
+# gets no duplicate. Failure guard: extra_args still lands last.
+# ---------------------------------------------------------------------------
+
+def test_sglang_metrics_endpoint_is_enabled():
+    """Without --enable-metrics SGLang serves no counters to scrape."""
+    from lmswitch.runtimes.sglang import _sglang_args
+    assert "--enable-metrics" in _sglang_args({})
+
+
+def test_sglang_metrics_flag_is_not_duplicated():
+    from lmswitch.runtimes.sglang import _sglang_args
+    args = _sglang_args({"extra_args": ["--enable-metrics", "--foo"]})
+    assert args.count("--enable-metrics") == 1
+
+
+def test_sglang_metrics_flag_is_not_duplicated_from_a_string():
+    from lmswitch.runtimes.sglang import _sglang_args
+    args = _sglang_args({"extra_args": "--enable-metrics --foo"})
+    assert args.count("--enable-metrics") == 1
+
+
+def test_sglang_extra_args_still_come_last():
+    from lmswitch.runtimes.sglang import _sglang_args
+    args = _sglang_args({"extra_args": ["--foo", "bar"]})
+    assert args[-2:] == ["--foo", "bar"]

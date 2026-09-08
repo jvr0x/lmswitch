@@ -77,7 +77,12 @@ def _sglang_args(yaml: dict) -> list[str]:
         args += ["--reasoning-parser", str(yaml["reasoning_parser"])]
     if yaml.get("sampling_defaults"):
         args += ["--sampling-defaults", str(yaml["sampling_defaults"])]
-    args += _extra_args(yaml)
+    extra = _extra_args(yaml)
+    # Reason: same as llama's --metrics — SGLang exposes /metrics only with
+    # --enable-metrics, and `lmswitch stats` scrapes its token counters there.
+    if "--enable-metrics" not in extra:
+        args.append("--enable-metrics")
+    args += extra
     return args
 
 

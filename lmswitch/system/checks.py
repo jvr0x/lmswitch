@@ -2,6 +2,8 @@
 
 import os
 import subprocess
+import time
+from datetime import datetime, timezone
 
 from lmswitch.system.io import RUN_DIR, CONF_DIR, _load_yaml, _model_size_and_present
 from lmswitch.system.memory import _ram_line
@@ -97,3 +99,84 @@ def _is_running(name: str, runtime: str) -> bool:
         if port and port in _listening_ports():
             return True
     return False
+
+
+def _seconds_since(stamp: str) -> float:
+    """Returns the seconds elapsed since an RFC-3339 timestamp.
+
+    Args:
+        stamp: Timestamp as Docker reports it, e.g.
+            ``"2026-09-08T09:30:34.152106113Z"``.
+
+    Returns:
+        Elapsed seconds, or 0.0 when *stamp* cannot be parsed.
+    """
+    # Reason: Docker emits nanosecond precision and a literal `Z`. Neither is
+    # accepted by `datetime.fromisoformat` on 3.10, so trim the fraction to
+    # microseconds and spell the zone out before parsing.
+    text = stamp.strip().replace("Z", "+00:00")
+    head, dot, tail = text.partition(".")
+    if dot:
+        digits = ""
+        idx = 0
+        while idx < len(tail) and tail[idx].isdigit():
+            digits += tail[idx]
+            idx += 1
+        text = f"{head}.{digits[:6]}{tail[idx:]}"
+    try:
+        started = datetime.fromisoformat(text)
+    except ValueError:
+        return 0.0
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
+
+
+def _container_uptime(name: str, prefix: str) -> float:
+    """Returns the uptime of *name*'s Docker container in seconds."""
+    cid = _docker_container(name, prefix)
+    if cid is None:
+        return 0.0
+    try:
+        started = subprocess.check_output(
+            ["docker", "inspect", "-f", "{{.State.StartedAt}}", cid],
+            text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return 0.0
+    return _seconds_since(started)
+
+
+def _process_uptime(name: str) -> float:
+    """Returns the uptime of *name*'s llama-server process in seconds."""
+    pid_file = RUN_DIR / name
+    if not pid_file.exists():
+        return 0.0
+    try:
+        pid = int(pid_file.read_text().strip())
+        # Reason: the /proc/<pid> directory inode is stamped at process
+        # creation, so its ctime is the real process start — unlike the pid
+        # file's mtime, which a re-exec under systemd would leave untouched.
+        return max(0.0, time.time() - os.stat(f"/proc/{pid}").st_ctime)
+    except (ValueError, OSError):
+        return 0.0
+
+
+def server_uptime(name: str, runtime: str) -> float:
+    """Returns how long the server process behind *name* has been up.
+
+    Reads the real process/container start time rather than lmswitch's own
+    bookkeeping: a ``restart:`` recipe is respawned by systemd without lmswitch
+    ever seeing it, so its last recorded start event can be weeks older than
+    the process actually serving — and than the token counters scraped off it.
+
+    Args:
+        name: Model name (the yaml stem).
+        runtime: Runtime type string (e.g. ``"vllm"``, ``"llama-dual"``).
+
+    Returns:
+        Uptime in seconds, or 0.0 when the server is down or unreadable.
+    """
+    if runtime in _DOCKER_BACKED_RUNTIMES:
+        return _container_uptime(name, _container_prefix(runtime))
+    return _process_uptime(name)

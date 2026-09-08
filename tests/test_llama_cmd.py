@@ -73,12 +73,58 @@ def test_fit_disabled_by_default():
     assert cmd[cmd.index("-fit") + 1] == "off"
 
 
+# ---------------------------------------------------------------------------
+# --metrics — llama.cpp serves /metrics only when asked, and `lmswitch stats`
+# reads its token counters from there.
+#
+# Expected use: a plain recipe gets the flag. Edge: a recipe that already sets
+# it, in either the list or the string form of extra_args, is not given a
+# duplicate. Failure guard: extra_args still lands last, so a recipe keeps the
+# final say under llama.cpp's last-wins parser.
+# ---------------------------------------------------------------------------
+
+def _build(**over) -> list:
+    """Builds the llama argv for a minimal recipe plus *over*."""
+    from pathlib import Path as _Path
+    from lmswitch.runtimes.llama import LlamaRuntime
+    yaml = {"model": "a/b.gguf", "port": 8085, "_models_dir": _Path("/tmp")}
+    yaml.update(over)
+    cmd, _ = LlamaRuntime()._build_cmd("m", yaml)
+    return cmd
+
+
+def test_metrics_endpoint_is_enabled():
+    """Without --metrics the server 404s /metrics and no tokens are logged."""
+    assert "--metrics" in _build()
+
+
+def test_metrics_flag_is_not_duplicated_from_a_list():
+    cmd = _build(extra_args=["--metrics", "--jinja"])
+    assert cmd.count("--metrics") == 1
+
+
+def test_metrics_flag_is_not_duplicated_from_a_string():
+    """extra_args in string form is shell-split before the check."""
+    cmd = _build(extra_args="--metrics --jinja")
+    assert cmd.count("--metrics") == 1
+
+
+def test_extra_args_still_come_last():
+    cmd = _build(extra_args=["-fa", "on"])
+    assert cmd[-2:] == ["-fa", "on"]
+    assert cmd.index("--metrics") < cmd.index("-fa")
+
+
 if __name__ == "__main__":
     failures = 0
     for fn in (test_no_equals_form_args,
                test_model_path_is_separate_arg,
                test_diagnostics_not_suppressed,
-               test_fit_disabled_by_default):
+               test_fit_disabled_by_default,
+               test_metrics_endpoint_is_enabled,
+               test_metrics_flag_is_not_duplicated_from_a_list,
+               test_metrics_flag_is_not_duplicated_from_a_string,
+               test_extra_args_still_come_last):
         try:
             fn()
             print(f"PASS {fn.__name__}")

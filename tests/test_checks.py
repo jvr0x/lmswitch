@@ -119,3 +119,100 @@ def test_cluster_is_running_delegates_and_passes_runtime():
         result = cluster_mod._is_running("some-dual-model", "vllm-dual-ray")
     delegate.assert_called_once_with("some-dual-model", "vllm-dual-ray")
     assert result == "sentinel"
+
+
+# ---------------------------------------------------------------------------
+# server_uptime — real process/container start time
+#
+# Expected use: a live llama PID and a live container both report a plausible
+# uptime, and server_uptime routes to the right one per runtime.
+# Edge: Docker's nanosecond + `Z` stamp, which datetime.fromisoformat rejects
+# verbatim on 3.10, still parses.
+# Failure: a missing pid file, a stale PID, a vanished container and an
+# unparsable stamp all report 0.0 rather than raising into the stop path.
+# ---------------------------------------------------------------------------
+
+import os
+from datetime import datetime, timedelta, timezone
+
+
+def _docker_stamp(seconds_ago: float) -> str:
+    """Builds a Docker-shaped RFC-3339 stamp *seconds_ago* in the past."""
+    moment = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f") + "000Z"
+
+
+def test_process_uptime_reads_the_real_process_start(tmp_path, monkeypatch):
+    """A live PID reports its own age, not the pid file's."""
+    monkeypatch.setattr(checks_mod, "RUN_DIR", tmp_path)
+    (tmp_path / "mymodel").write_text(str(os.getpid()))
+
+    uptime = checks_mod.server_uptime("mymodel", "llama")
+
+    # The test process is older than 0s and younger than a day.
+    assert 0.0 < uptime < 86400.0
+
+
+def test_container_uptime_from_docker_started_at(tmp_path, monkeypatch):
+    """A Docker-backed runtime reads State.StartedAt off the container."""
+    monkeypatch.setattr(checks_mod, "_docker_container", lambda *a, **k: "deadbeef1234")
+    monkeypatch.setattr(checks_mod.subprocess, "check_output",
+                        lambda *a, **k: _docker_stamp(600.0))
+
+    uptime = checks_mod.server_uptime("mymodel", "vllm-dual")
+
+    assert 595.0 < uptime < 610.0
+
+
+def test_server_uptime_routes_by_runtime(tmp_path, monkeypatch):
+    """Docker-backed runtimes never take the pid-file path, and vice versa."""
+    monkeypatch.setattr(checks_mod, "RUN_DIR", tmp_path)
+    (tmp_path / "mymodel").write_text(str(os.getpid()))
+    monkeypatch.setattr(checks_mod, "_docker_container", lambda *a, **k: None)
+
+    # llama has no container, but does have the pid file.
+    assert checks_mod.server_uptime("mymodel", "llama") > 0.0
+    # sglang is container-backed, and its container is gone.
+    assert checks_mod.server_uptime("mymodel", "sglang") == 0.0
+
+
+def test_seconds_since_parses_docker_nanoseconds_and_zulu():
+    """Docker's 9-digit fraction and literal Z are both normalised."""
+    assert 55.0 < checks_mod._seconds_since(_docker_stamp(60.0)) < 65.0
+
+
+def test_seconds_since_parses_an_explicit_offset():
+    """A stamp already carrying a numeric offset needs no rewriting."""
+    moment = datetime.now(timezone.utc) - timedelta(seconds=30)
+    assert 25.0 < checks_mod._seconds_since(moment.isoformat()) < 35.0
+
+
+def test_process_uptime_without_pid_file_is_zero(tmp_path, monkeypatch):
+    """A model that was never started here reports no uptime."""
+    monkeypatch.setattr(checks_mod, "RUN_DIR", tmp_path)
+    assert checks_mod.server_uptime("never-started", "llama") == 0.0
+
+
+def test_process_uptime_with_a_stale_pid_is_zero(tmp_path, monkeypatch):
+    """A pid file left behind by a dead process reports no uptime."""
+    monkeypatch.setattr(checks_mod, "RUN_DIR", tmp_path)
+    # Above the kernel's default pid_max — cannot name a live process.
+    (tmp_path / "mymodel").write_text("999999999")
+    assert checks_mod.server_uptime("mymodel", "llama") == 0.0
+
+
+def test_container_uptime_when_docker_fails_is_zero(monkeypatch):
+    """A failing `docker inspect` must not raise into the stop path."""
+    monkeypatch.setattr(checks_mod, "_docker_container", lambda *a, **k: "deadbeef1234")
+
+    def _boom(*args, **kwargs):
+        raise OSError("docker daemon is not running")
+
+    monkeypatch.setattr(checks_mod.subprocess, "check_output", _boom)
+    assert checks_mod.server_uptime("mymodel", "vllm") == 0.0
+
+
+def test_seconds_since_garbage_is_zero():
+    """An unparsable stamp accounts as no uptime."""
+    assert checks_mod._seconds_since("not-a-timestamp") == 0.0
+    assert checks_mod._seconds_since("") == 0.0

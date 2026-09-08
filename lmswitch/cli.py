@@ -421,6 +421,26 @@ def _delegate(host: str, action: str, name: str) -> None:
                     "$HOME/.local/bin/lmswitch", action, name], check=False)
 
 
+def _stop_systemd(name: str, runtime: str, yaml: dict) -> None:
+    """Stops a ``restart:``-managed model and records its usage event.
+
+    Reason: a supervised model is torn down by systemd, not by ``stop_model``,
+    so this path has to sample the live server and record the stop itself —
+    otherwise the always-on profiles, which serve by far the most tokens, log
+    starts and never a stop. The sample must precede the unit stop: uptime and
+    the token counters both die with the server process.
+
+    Args:
+        name: Model name (the yaml stem).
+        runtime: Runtime type string.
+        yaml: Parsed model config.
+    """
+    sample = usage_mod.sample_server(name, runtime, yaml)
+    subprocess.run(["systemctl", "--user", "stop", f"lmswitch@{name}.service"],
+                   check=False)
+    usage_mod.record_stop(name, *sample)
+
+
 def cmd_on(target: str) -> None:
     name, remote = _resolve(target)
     if remote:
@@ -441,8 +461,7 @@ def cmd_off(target: str) -> None:
     yaml = _load_yaml(yaml_path)
     runtime = yaml.get("runtime", "llama")
     if yaml.get("restart"):
-        unit = f"lmswitch@{name}.service"
-        subprocess.run(["systemctl", "--user", "stop", unit], check=False)
+        _stop_systemd(name, runtime, yaml)
         print(f"Stopped {name} (systemd)")
     else:
         stop_model(name, runtime)
@@ -1128,8 +1147,7 @@ def toggle(target: str, action: str) -> None:
         start_model(name, yaml)
     else:
         if yaml.get("restart"):
-            unit = f"lmswitch@{name}.service"
-            subprocess.run(["systemctl", "--user", "stop", unit], check=False)
+            _stop_systemd(name, runtime, yaml)
             print(f"  ↓ {name} stopped (systemd)")
         else:
             stop_model(name, runtime)
