@@ -200,6 +200,27 @@ class VLLMDualRuntime(VLLMRuntime):
         ):
             if check.returncode != 0:
                 return f"image {image} missing on {where}"
+
+        # Both nodes bind the port. `start` only notices this model's own
+        # container, so a different occupant -- another recipe, or a container
+        # started outside lmswitch by an external recipe's script -- passes
+        # unnoticed, then bind-clashes and claims GPU memory twice. On unified
+        # memory that can take the node down, so refuse instead.
+        from lmswitch.system.checks import port_holder
+        port = yaml.get("port", 8888)
+        own = f"vllm-{name}"
+        held = port_holder(port, own_container=own)
+        if held:
+            return f"{held} on local (stop it, or serve this recipe elsewhere)"
+        probe = _ssh(worker,
+                     ["docker", "ps", "--filter", f"publish={port}",
+                      "--format", "{{.Names}}"],
+                     capture_output=True, text=True)
+        if probe.returncode == 0:
+            others = [n for n in probe.stdout.split() if n and n != own]
+            if others:
+                return (f"port {port} is already held by container "
+                        f"{', '.join(others)} on {worker}")
         return None
 
     def start(self, name: str, yaml: dict) -> RunningState:

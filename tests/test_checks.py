@@ -216,3 +216,64 @@ def test_seconds_since_garbage_is_zero():
     """An unparsable stamp accounts as no uptime."""
     assert checks_mod._seconds_since("not-a-timestamp") == 0.0
     assert checks_mod._seconds_since("") == 0.0
+
+
+def test_port_holder_free_port_is_none(monkeypatch):
+    """A port nothing is listening on is not a conflict."""
+    monkeypatch.setattr(checks_mod, "_listening_ports", lambda: {8000})
+    assert checks_mod.port_holder(8888) is None
+
+
+def test_port_holder_names_a_published_container(monkeypatch):
+    """A bridge-mode container publishing the port is named outright."""
+    monkeypatch.setattr(checks_mod, "_listening_ports", lambda: {8888})
+    monkeypatch.setattr(checks_mod.subprocess, "check_output",
+                        lambda *a, **k: "vllm-other\n")
+    held = checks_mod.port_holder(8888)
+    assert "vllm-other" in held and "8888" in held
+
+
+def test_port_holder_skips_our_own_container(monkeypatch):
+    """Restarting a model that already holds the port is not a conflict.
+
+    The published-name branch must ignore own_container; the port is still in
+    use, so a message is still returned, but it must not accuse us of clashing
+    with ourselves.
+    """
+    monkeypatch.setattr(checks_mod, "_listening_ports", lambda: {8888})
+    monkeypatch.setattr(checks_mod.subprocess, "check_output",
+                        lambda *a, **k: "vllm-mine\n")
+    assert "vllm-mine" not in checks_mod.port_holder(
+        8888, own_container="vllm-mine")
+
+
+def test_port_holder_host_network_is_a_hint_not_an_accusation(monkeypatch):
+    """Host-network containers publish no port map, so they can only be hinted.
+
+    `docker ps --filter publish=` cannot see them, and its silence says nothing
+    about whether a container holds the port. The message must not claim the
+    holder is not a container.
+    """
+    monkeypatch.setattr(checks_mod, "_listening_ports", lambda: {8888})
+    calls = []
+
+    def _fake(cmd, *a, **k):
+        calls.append(cmd)
+        return "" if "publish=8888" in cmd else "vllm-fn\n"
+
+    monkeypatch.setattr(checks_mod.subprocess, "check_output", _fake)
+    held = checks_mod.port_holder(8888)
+    assert "vllm-fn" in held
+    assert "may hold it" in held
+    assert "non-container" not in held
+
+
+def test_port_holder_survives_docker_being_down(monkeypatch):
+    """Docker unreachable still reports the conflict, just unattributed."""
+    monkeypatch.setattr(checks_mod, "_listening_ports", lambda: {8888})
+
+    def _boom(*a, **k):
+        raise OSError("docker daemon is not running")
+
+    monkeypatch.setattr(checks_mod.subprocess, "check_output", _boom)
+    assert checks_mod.port_holder(8888) == "port 8888 is already in use"

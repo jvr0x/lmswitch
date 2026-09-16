@@ -25,6 +25,52 @@ def _listening_ports() -> set[int]:
     return ports
 
 
+def port_holder(port: int, own_container: str | None = None) -> str | None:
+    """Describes what already holds *port*, or None if it is free.
+
+    The container-name check in each runtime's ``start`` only notices a model
+    restarting itself. It does not notice a *different* occupant of the same
+    port -- another recipe on the same port, or a container this tool did not
+    start, such as one launched by an external recipe's own script. Those
+    launch anyway, bind-clash, and claim GPU memory twice, which on unified
+    memory can take the box down.
+
+    *own_container* is skipped so restarting a model that is already up is not
+    reported as a conflict.
+    """
+    if port not in _listening_ports():
+        return None
+
+    # Attribution is best-effort. Every Docker-backed runtime here launches
+    # with --network host, and a host-network container publishes no port map,
+    # so `docker ps --filter publish=` cannot see it -- its silence says
+    # nothing about whether a container holds the port. Name what can be named
+    # and stay vague otherwise, rather than asserting "not a container" from
+    # the absence of evidence.
+    def _names(*filters: str) -> list[str]:
+        try:
+            out = subprocess.check_output(
+                ["docker", "ps", "--format", "{{.Names}}", *filters],
+                text=True, stderr=subprocess.DEVNULL)
+        except Exception:
+            return []
+        return [n for n in out.split() if n and n != own_container]
+
+    published = _names("--filter", f"publish={port}")
+    if published:
+        return f"port {port} is already held by container {', '.join(published)}"
+
+    host_net = _names("--filter", "network=host")
+    if host_net:
+        # A hint, not an attribution: these containers share the host's
+        # network namespace so any of them *could* hold the port, and so
+        # could a plain host process.
+        return (f"port {port} is already in use "
+                f"(host-network containers that may hold it: "
+                f"{', '.join(host_net)})")
+    return f"port {port} is already in use"
+
+
 # Container name prefix per Docker-backed runtime. Every vLLM recipe is
 # named ``vllm-<model>``; sglang gets its own namespace so the same model
 # wired for both backends never collides on a container name.
