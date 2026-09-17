@@ -1,4 +1,4 @@
-"""Tests for lmswitch sync to opencode, hermes, and grok.
+"""Tests for lmswitch sync to opencode, hermes, grok, and omp.
 
 These tests import from the lmswitch package and use temp directories.
 """
@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-from lmswitch.sync import regen_opencode, regen_hermes, regen_grok, regen_all
+from lmswitch.sync import regen_opencode, regen_hermes, regen_grok, regen_omp, regen_all
 from lmswitch.system import _get_sync_targets
 from lmswitch.cli import cmd_on, cmd_off
 
@@ -426,6 +426,179 @@ def test_regen_grok_skipped_when_parent_missing():
             assert regen_grok() is False
 
 
+
+# ---------------------------------------------------------------------------
+# regen_omp
+# ---------------------------------------------------------------------------
+
+def _omp_providers(path: Path) -> dict:
+    import yaml as _yaml
+    return (_yaml.safe_load(path.read_text()) or {}).get("providers", {})
+
+
+def test_regen_omp_writes_running_models():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 262144, "Qwen3.6-35B")
+        _make_model_cfg(models_dir, "qwen3-vl-8b", 8109, 65536, "Qwen3-VL-8B")
+        _make_model_cfg(models_dir, "stopped-model", 8110, 65536, "Stopped")
+        _write_lmswitch_config(models_dir, {"SYNC_OMP": "true"})
+
+        omp_cfg = tmp / "omp" / "models.yml"
+        omp_cfg.parent.mkdir()
+
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b", "qwen3-vl-8b"})), \
+             mock.patch("lmswitch.sync.OMP_MODELS", omp_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_omp() is True
+
+        providers = _omp_providers(omp_cfg)
+        assert list(providers) == ["lmswitch"]
+        prov = providers["lmswitch"]
+        assert prov["auth"] == "none"
+        assert prov["api"] == "openai-completions"
+        ids = [m["id"] for m in prov["models"]]
+        assert ids == ["qwen3-vl-8b", "qwen3.6-35b"]
+        assert prov["baseUrl"] == "http://127.0.0.1:1/v1"
+        by_id = {m["id"]: m for m in prov["models"]}
+        assert by_id["qwen3.6-35b"]["baseUrl"] == "http://spark-8912.local:8089/v1"
+        assert by_id["qwen3.6-35b"]["contextWindow"] == 262144
+        assert by_id["qwen3.6-35b"]["maxTokens"] == 32768
+        assert "Spark-8912" in by_id["qwen3.6-35b"]["name"]
+        assert by_id["qwen3-vl-8b"]["input"] == ["text", "image"]
+        assert "input" not in by_id["qwen3.6-35b"]
+        assert "stopped-model" not in ids
+
+
+def test_regen_omp_preserves_foreign_providers():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 65536)
+        _write_lmswitch_config(models_dir, {"SYNC_OMP": "true"})
+
+        omp_cfg = tmp / "omp" / "models.yml"
+        omp_cfg.parent.mkdir()
+        omp_cfg.write_text(
+            "providers:\n"
+            "  ollama:\n"
+            "    baseUrl: http://127.0.0.1:11434\n"
+            "    auth: none\n"
+            "  lmswitch:\n"
+            "    baseUrl: http://stale:9999/v1\n"
+            "    auth: none\n"
+            "    api: openai-completions\n"
+            "    models:\n"
+            "      - id: gone\n"
+        )
+
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
+             mock.patch("lmswitch.sync.OMP_MODELS", omp_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_omp() is True
+
+        providers = _omp_providers(omp_cfg)
+        assert providers["ollama"]["baseUrl"] == "http://127.0.0.1:11434"
+        assert [m["id"] for m in providers["lmswitch"]["models"]] == ["qwen3.6-35b"]
+
+
+def test_regen_omp_drops_provider_when_nothing_serves():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 65536)
+        _write_lmswitch_config(models_dir, {"SYNC_OMP": "true"})
+
+        omp_cfg = tmp / "omp" / "models.yml"
+        omp_cfg.parent.mkdir()
+        omp_cfg.write_text(
+            "providers:\n"
+            "  lmswitch:\n"
+            "    baseUrl: http://stale:9999/v1\n"
+            "    auth: none\n"
+            "    api: openai-completions\n"
+            "    models:\n"
+            "      - id: gone\n"
+        )
+
+        with mock.patch("lmswitch.sync._is_running", side_effect=_mock_is_running(set())), \
+             mock.patch("lmswitch.sync.OMP_MODELS", omp_cfg), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_omp() is True
+
+        assert "lmswitch" not in _omp_providers(omp_cfg)
+
+
+def test_regen_omp_idempotent():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 65536)
+        _write_lmswitch_config(models_dir, {"SYNC_OMP": "true"})
+
+        omp_cfg = tmp / "omp" / "models.yml"
+        omp_cfg.parent.mkdir()
+
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
+             mock.patch("lmswitch.sync.OMP_MODELS", omp_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_omp() is True
+            assert regen_omp() is False
+
+
+def test_regen_omp_disabled_when_not_a_target():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 65536)
+        _write_lmswitch_config(models_dir, {"SYNC_OMP": "false"})
+
+        omp_cfg = tmp / "omp" / "models.yml"
+        omp_cfg.parent.mkdir()
+
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
+             mock.patch("lmswitch.sync.OMP_MODELS", omp_cfg), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_omp() is False
+        assert not omp_cfg.exists()
+
+
+def test_regen_omp_skipped_when_agent_dir_missing():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "qwen3.6-35b", 8089, 65536)
+        _write_lmswitch_config(models_dir, {"SYNC_OMP": "true"})
+
+        omp_cfg = tmp / "nonexistent" / "models.yml"
+
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"qwen3.6-35b"})), \
+             mock.patch("lmswitch.sync.OMP_MODELS", omp_cfg), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_omp() is False
+
+
 # ---------------------------------------------------------------------------
 # _get_sync_targets
 # ---------------------------------------------------------------------------
@@ -454,11 +627,23 @@ def test_get_sync_targets_respects_config():
         assert "grok" in targets
 
 
+def test_get_sync_targets_omp_is_opt_in():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        cfg_file = tmp / ".lmswitch"
+        cfg_file.write_text("")
+        with mock.patch("lmswitch.system.io.CONFIG_FILE", cfg_file):
+            assert "omp" not in _get_sync_targets()
+        cfg_file.write_text("SYNC_OMP=true\n")
+        with mock.patch("lmswitch.system.io.CONFIG_FILE", cfg_file):
+            assert "omp" in _get_sync_targets()
+
+
 def test_get_sync_targets_fallback_to_opencode():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         cfg_file = tmp / ".lmswitch"
-        cfg_file.write_text("SYNC_OPENCODE=false\nSYNC_HERMES=false\nSYNC_GROK=false\n")
+        cfg_file.write_text("SYNC_OPENCODE=false\nSYNC_HERMES=false\nSYNC_GROK=false\nSYNC_OMP=false\n")
         with mock.patch("lmswitch.system.io.CONFIG_FILE", cfg_file):
             targets = _get_sync_targets()
         assert targets == ["opencode"]

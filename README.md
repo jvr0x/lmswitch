@@ -25,8 +25,9 @@ start/stop them interactively. **GGUF** models run under
 background process); **vLLM** models run in Docker. It waits for each model to
 actually become ready, refuses loads that would exceed free RAM, and keeps your
 coding agents' configs in sync — [opencode](https://opencode.ai),
-[hermes](https://github.com/NousResearch/hermes-agent), and
-[grok](https://github.com/xai-org/grok-cli) — with whatever is serving.
+[hermes](https://github.com/NousResearch/hermes-agent),
+[grok](https://github.com/xai-org/grok-cli), and [omp](https://omp.sh) — with
+whatever is serving.
 
 Running `lmswitch` (the same wordmark above greets you):
 
@@ -67,8 +68,9 @@ Running `lmswitch` (the same wordmark above greets you):
   the machine.
 - **Config sync** — on every toggle / `on` / `off` / `sync`, the
   currently-serving models are written into your coding agents' configs:
-  **opencode** (`opencode.json`), **hermes** (`config.yaml`), and **grok**
-  (`config.toml`). Pick which targets are active during `lmswitch init`. See
+  **opencode** (`opencode.json`), **hermes** (`config.yaml`), **grok**
+  (`config.toml`), and **omp** (`models.yml`). Pick which targets are active
+  during `lmswitch init`. See
   [Config sync](#config-sync).
 - **Optional systemd auto-restart** per model via `restart: on-failure`.
 
@@ -83,7 +85,7 @@ systemd user units).
 | GGUF models | A built `llama.cpp` with `llama-server` (a CUDA build for GPU offload). Default binary path: `<lmswitch>/../llama.cpp/build/bin/llama-server` — override per-model with `llama_bin:`. |
 | vLLM models | Docker + the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/) (`--gpus all`). Pulls the `vllm/vllm-openai` image. |
 | `restart: on-failure` | A running systemd **user** instance (`systemctl --user`). |
-| config sync | Any of [opencode](https://opencode.ai), [hermes](https://github.com/NousResearch/hermes-agent), [grok](https://github.com/xai-org/grok-cli) (all optional — only configs that exist are synced). |
+| config sync | Any of [opencode](https://opencode.ai), [hermes](https://github.com/NousResearch/hermes-agent), [grok](https://github.com/xai-org/grok-cli), [omp](https://omp.sh) (all optional — only configs that exist are synced). |
 
 ## Submodule
 
@@ -130,7 +132,7 @@ pip install -e .                                    # inside an activated virtua
 
 `init` asks where your models live (writes `ai-models/.lmswitch`), creates the
 `ai-models/` config dir, and asks which sync targets to enable (opencode / hermes
-/ grok — only the ones whose configs it finds). It does **not** reinstall the
+/ grok / omp — only the ones whose configs it finds). It does **not** reinstall the
 command: if a `lmswitch` console script is already on your `PATH` (from the step
 above) it leaves it alone; only if none is found does it drop a small launcher in
 `~/.local/bin` pinned to the current interpreter. Ensure `~/.local/bin` is on
@@ -149,7 +151,7 @@ lmswitch`.
    [`examples/`](examples/) into `ai-models/<name>.yaml`.
 5. `lmswitch` → type the model's number to start it. It loads, waits until the
    endpoint answers, prints `Ready on port <port>`, and syncs your enabled
-   configs (opencode / hermes / grok).
+   configs (opencode / hermes / grok / omp).
 6. Hit it: `curl localhost:<port>/v1/models`.
 
 ## Usage
@@ -355,7 +357,8 @@ first shard.
 - **Config sync** → each enabled target gets the currently-serving models, all
   pointing at `http://<SPARK_HOST>:<port>/v1`: **opencode** one provider per
   model, **hermes** the active model + a `custom_providers` entry per model (so
-  they show in `/model`), **grok** one `[model.<id>]` table per model.
+  they show in `/model`), **grok** one `[model.<id>]` table per model, **omp**
+  one `lmswitch` provider holding every model.
   `SPARK_HOST` is a constant in [`lmswitch.system.io`](lmswitch/system/io.py)
   (`spark-8912.local`) — change it if your host differs. See [Config sync](#config-sync).
 
@@ -370,7 +373,7 @@ constant defined in the package (`lmswitch.system.io.SPARK_HOST`); set it to you
 serving host.
 
 Targets are chosen during `lmswitch init` and stored as `SYNC_OPENCODE` /
-`SYNC_HERMES` / `SYNC_GROK` in `ai-models/.lmswitch` (only configs that exist on
+`SYNC_HERMES` / `SYNC_GROK` / `SYNC_OMP` in `ai-models/.lmswitch` (only configs that exist on
 disk are touched; a target with no config is skipped). Each shapes its own file:
 
 - **[opencode](https://opencode.ai)** → `~/.config/opencode/opencode.json` gets
@@ -391,6 +394,16 @@ disk are touched; a target with no config is skipped). Each shapes its own file:
 - **[grok](https://github.com/xai-org/grok-cli)** → `~/.grok/config.toml` gets
   one `[model.<id>]` table per serving model; all your other grok settings
   (`[cli]`, `[ui]`, marketplace, the `[models] default`, …) are left untouched.
+- **[omp](https://omp.sh)** → `~/.omp/agent/models.yml` gets a single
+  `lmswitch` provider whose `models:` list carries one entry per serving model,
+  each with its own `baseUrl`, so selectors read `lmswitch/<model>`. Models are
+  written out explicitly instead of using omp's `discovery:` block: discovery
+  re-probes `/v1/models` on every catalog refresh, which costs a full HTTP
+  timeout per dead lane (the same hang `discover_models: false` avoids for
+  hermes). Other providers in the file (ollama, a hosted proxy) are preserved,
+  and the `lmswitch` provider is dropped entirely when nothing is serving.
+  `SYNC_OMP` is **opt-in** — an existing `.lmswitch` predates omp support, so
+  set `SYNC_OMP=true` (or re-run `lmswitch init`) to enable it.
 
 Run `lmswitch sync` to regenerate on demand — handy after a detached load
 finishes.
@@ -406,7 +419,7 @@ or loader code.
 lmswitch/
 ├── __main__.py          # `python -m lmswitch`
 ├── cli.py               # arg parsing, table rendering, interactive TUI, commands
-├── sync.py              # opencode / hermes / grok config sync
+├── sync.py              # opencode / hermes / grok / omp config sync
 ├── models/
 │   └── loader.py        # discover & parse ai-models/*.yaml → model dicts
 ├── runtimes/            # how a model is started / stopped / probed
@@ -452,7 +465,7 @@ uv run pytest tests/test_sync.py::test_regen_hermes_keeps_running_default_sticky
 | `tests/test_cli.py` | name/index resolution, rendering, command dispatch, `init` |
 | `tests/test_llama_cmd.py` | llama-server command construction |
 | `tests/test_vllm_and_abort.py` | vLLM start, readiness, RAM guard, Ctrl-C, opencode sync |
-| `tests/test_sync.py` | config sync to opencode / hermes / grok (selection, idempotency, round-trip) |
+| `tests/test_sync.py` | config sync to opencode / hermes / grok / omp (selection, idempotency, round-trip) |
 | `tests/test_process_lifecycle.py` | start → detect-running → stop lifecycle |
 
 All tests are pure unit tests — `subprocess` / Docker / `curl` / ports are

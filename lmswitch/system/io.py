@@ -32,13 +32,15 @@ OPENCODE = HOME / ".config" / "opencode" / "opencode.json"
 OPENCODE_EXPORT = HOME / ".local" / "share" / "opencode-export" / "opencode.json"
 HERMES_CONFIG = HOME / ".hermes" / "config.yaml"
 GROK_CONFIG = HOME / ".grok" / "config.toml"
+OMP_MODELS = HOME / ".omp" / "agent" / "models.yml"
 SPARK_HOST = os.environ.get("SPARK_HOST") or f"{socket.gethostname()}.local"
 
 SYNC_OPENCODE = "SYNC_OPENCODE"
 SYNC_HERMES = "SYNC_HERMES"
 SYNC_GROK = "SYNC_GROK"
+SYNC_OMP = "SYNC_OMP"
 
-DEFAULT_SYNC_TARGETS = [SYNC_OPENCODE, SYNC_HERMES, SYNC_GROK]
+DEFAULT_SYNC_TARGETS = [SYNC_OPENCODE, SYNC_HERMES, SYNC_GROK, SYNC_OMP]
 
 TTY = sys.stdout.isatty()
 
@@ -287,6 +289,10 @@ def _get_sync_targets() -> list[str]:
         targets.append("hermes")
     if cfg.get(SYNC_GROK, "true").lower() in ("true", "1", "yes"):
         targets.append("grok")
+    # Opt-in: an existing .lmswitch predates omp support, and writing a config
+    # into ~/.omp/ for someone who never asked for it is not a safe default.
+    if cfg.get(SYNC_OMP, "false").lower() in ("true", "1", "yes"):
+        targets.append("omp")
     if not targets:
         targets = ["opencode"]
     return targets

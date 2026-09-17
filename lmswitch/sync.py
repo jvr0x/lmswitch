@@ -1,4 +1,5 @@
-"""Config sync: regenerate opencode.json, hermes config.yaml, grok config.toml."""
+"""Config sync: regenerate opencode.json, hermes config.yaml, grok config.toml,
+omp models.yml."""
 
 import json
 import re
@@ -10,10 +11,12 @@ from lmswitch.system.io import (
     OPENCODE_EXPORT,
     HERMES_CONFIG,
     GROK_CONFIG,
+    OMP_MODELS,
     SPARK_HOST,
     SYNC_OPENCODE,
     SYNC_HERMES,
     SYNC_GROK,
+    SYNC_OMP,
 )
 from lmswitch.system import _get_sync_targets
 from lmswitch.system.checks import _is_running
@@ -25,6 +28,20 @@ def _host_label(hostname: str) -> str:
     """Short display label for a host string, e.g. ``spark.local`` -> ``Spark``,
     ``dual`` -> ``Dual``."""
     return (hostname or "?").split(".")[0].capitalize()
+
+
+def _is_vision(m: dict) -> bool:
+    """True for models whose name marks them as image-capable."""
+    name = m["name"].lower()
+    return "vision" in name or re.search(r"\bvl\b", name) is not None
+
+
+def _ctx_of(m: dict) -> int:
+    """Context window of a model config, falling back to 65536."""
+    try:
+        return int(m["ctx"]) if m["ctx"] else 65536
+    except (ValueError, TypeError):
+        return 65536
 
 
 def _cluster_running_models() -> list[dict]:
@@ -122,10 +139,6 @@ def regen_hermes() -> bool:
               if m["port"] and _is_running(m["name"], m["runtime"])]
     by_name = {m["name"]: m for m in running}
 
-    def _is_vision(m: dict) -> bool:
-        name = m["name"].lower()
-        return "vision" in name or re.search(r"\bvl\b", name) is not None
-
     non_vision = [m for m in running if not _is_vision(m)]
     vision = [m for m in running if _is_vision(m)]
 
@@ -145,12 +158,6 @@ def regen_hermes() -> bool:
     if vision_model is None and vision:
         vision_model = vision[0]
 
-    def _ctx(m: dict) -> int:
-        try:
-            return int(m["ctx"]) if m["ctx"] else 65536
-        except (ValueError, TypeError):
-            return 65536
-
     def _set(d: dict, key, value) -> bool:
         if d.get(key) != value:
             d[key] = value
@@ -164,7 +171,7 @@ def regen_hermes() -> bool:
         changed |= _set(cfg["model"], "provider", "custom")
         changed |= _set(cfg["model"], "base_url", base)
         changed |= _set(cfg["model"], "api_key", "none")
-        changed |= _set(cfg["model"], "context_length", _ctx(primary_model))
+        changed |= _set(cfg["model"], "context_length", _ctx_of(primary_model))
 
     if vision_model:
         base = f"http://{SPARK_HOST}:{vision_model['port']}/v1"
@@ -177,7 +184,7 @@ def regen_hermes() -> bool:
         changed |= _set(aux, "model", vision_model["name"])
         changed |= _set(aux, "base_url", base)
         changed |= _set(aux, "api_key", "none")
-        changed |= _set(aux, "context_length", _ctx(vision_model))
+        changed |= _set(aux, "context_length", _ctx_of(vision_model))
 
     # Register every serving model as a named custom provider so they all show
     # up in hermes' `/model` picker (the single `model:` block only holds the
@@ -200,7 +207,7 @@ def regen_hermes() -> bool:
             "base_url": f"http://{SPARK_HOST}:{m['port']}/v1",
             "api_key": "none",
             "model": m["name"],
-            "context_length": _ctx(m),
+            "context_length": _ctx_of(m),
             "models": {m["name"]: {}},
             "discover_models": False,
         }
@@ -211,7 +218,7 @@ def regen_hermes() -> bool:
             "base_url": f"http://{m['serve_host']}:{m['port']}/v1",
             "api_key": "none",
             "model": m["name"],
-            "context_length": _ctx(m),
+            "context_length": _ctx_of(m),
             "models": {m["name"]: {}},
             "discover_models": False,
         }
@@ -374,6 +381,99 @@ def regen_grok() -> bool:
     return True
 
 
+def regen_omp() -> bool:
+    """Register every serving model as omp models in ``~/.omp/agent/models.yml``.
+
+    omp keys custom models under a provider, and a model entry may carry its own
+    ``baseUrl`` that overrides the provider's, so all lanes live under one
+    ``lmswitch`` provider and each model points at its own port. Selectors then
+    read ``lmswitch/<model>`` instead of repeating the model name as a provider.
+
+    Reason: models are declared explicitly rather than through omp's
+    ``discovery`` block. Discovery re-probes ``/v1/models`` on every catalog
+    refresh, so a lane that died between syncs costs a full HTTP timeout on each
+    omp start — the same hang ``discover_models: false`` avoids for hermes. We
+    already know each server's single served id, its display name, and its
+    context window, so there is nothing to discover.
+
+    Providers other than ``lmswitch`` are left untouched, so hand-written
+    entries (ollama, a hosted proxy) survive a sync.
+    """
+    if "omp" not in _get_sync_targets():
+        return False
+    if not OMP_MODELS.parent.exists():
+        return False
+
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return False
+
+    try:
+        cfg = _yaml.safe_load(OMP_MODELS.read_text()) if OMP_MODELS.exists() else {}
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", _host_label(SPARK_HOST))
+             for m in load_models()
+             if m["port"] != 0 and _is_running(m["name"], m["runtime"])]
+    remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
+              _host_label(m.get("host") or m["remote_host"]))
+              for m in _cluster_running_models()]
+
+    models: list[dict] = []
+    for m, base, label in local + remote:
+        ctx = _ctx_of(m)
+        entry = {
+            "id": m["name"],
+            "name": f"{m['display']} ({label})",
+            "baseUrl": base,
+            "contextWindow": ctx,
+            # omp's own discovery caps local models at 32768 output tokens;
+            # match it rather than the 8192 the other targets ask for.
+            "maxTokens": min(32768, ctx),
+        }
+        if _is_vision(m):
+            entry["input"] = ["text", "image"]
+            entry["imageInputDecoder"] = "stb"
+        models.append(entry)
+
+    providers = cfg.get("providers")
+    providers = dict(providers) if isinstance(providers, dict) else {}
+    if models:
+        providers["lmswitch"] = {
+            # omp rejects a provider that defines models without a baseUrl, even
+            # though every model here carries its own (custom-models.ts resolves
+            # `modelDef.baseUrl ?? providerBaseUrl`). Deliberately a dead address:
+            # a real lane's URL would silently absorb any entry that lost its own
+            # baseUrl, and "first serving lane" changes on every sync.
+            "baseUrl": "http://127.0.0.1:1/v1",
+            "auth": "none",
+            "api": "openai-completions",
+            "models": models,
+        }
+    else:
+        providers.pop("lmswitch", None)
+
+    if providers:
+        cfg["providers"] = providers
+    elif "providers" in cfg:
+        del cfg["providers"]
+
+    payload = _yaml.safe_dump(
+        cfg, default_flow_style=False, sort_keys=False, allow_unicode=True, width=4096
+    )
+    existing = OMP_MODELS.read_text() if OMP_MODELS.exists() else ""
+    if existing == payload:
+        return False
+    tmp = OMP_MODELS.with_suffix(".tmp")
+    tmp.write_text(payload)
+    tmp.replace(OMP_MODELS)
+    return True
+
+
 def regen_all() -> bool:
     any_changed = False
     if "opencode" in _get_sync_targets():
@@ -384,5 +484,8 @@ def regen_all() -> bool:
             any_changed = True
     if "grok" in _get_sync_targets():
         if regen_grok():
+            any_changed = True
+    if "omp" in _get_sync_targets():
+        if regen_omp():
             any_changed = True
     return any_changed

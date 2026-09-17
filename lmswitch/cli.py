@@ -17,10 +17,12 @@ from lmswitch.system.io import (
     OPENCODE_EXPORT,
     HERMES_CONFIG,
     GROK_CONFIG,
+    OMP_MODELS,
     SPARK_HOST,
     SYNC_OPENCODE,
     SYNC_HERMES,
     SYNC_GROK,
+    SYNC_OMP,
     SCRIPT_DIR,
     _c,
     _read_config,
@@ -43,7 +45,7 @@ from lmswitch.runtimes import (
     _start_dual_foreground,
     _start_systemd,
 )
-from lmswitch.sync import regen_opencode, regen_hermes, regen_grok, regen_all
+from lmswitch.sync import regen_opencode, regen_hermes, regen_grok, regen_omp, regen_all
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +294,7 @@ def cmd_init() -> None:
         has_hermes = HERMES_CONFIG.exists()
         has_grok = GROK_CONFIG.exists()
         has_opencode = OPENCODE.exists()
+        has_omp = OMP_MODELS.parent.exists()
 
         if has_opencode:
             val = existing_cfg.get(SYNC_OPENCODE, "true")
@@ -329,10 +332,21 @@ def cmd_init() -> None:
             sync_cfg_lines.append(f'{SYNC_GROK}=false')
             print("  grok config not found — sync disabled.")
 
+        if has_omp:
+            print(f"  Sync to omp models.yml [Y/n] (omp detected)")
+            ans = input("  > ").strip().lower()
+            if ans == "n":
+                sync_cfg_lines.append(f'{SYNC_OMP}=false')
+            else:
+                sync_cfg_lines.append(f'{SYNC_OMP}=true')
+        else:
+            sync_cfg_lines.append(f'{SYNC_OMP}=false')
+            print("  omp agent dir not found — sync disabled.")
+
         if sync_cfg_lines:
             sync_cfg_content = "\n".join(sync_cfg_lines) + "\n"
             cfg_text = CONFIG_FILE.read_text()
-            for key in (SYNC_OPENCODE, SYNC_HERMES, SYNC_GROK):
+            for key in (SYNC_OPENCODE, SYNC_HERMES, SYNC_GROK, SYNC_OMP):
                 cfg_text = re.sub(
                     rf'^{key}=.+$', '', cfg_text, flags=re.MULTILINE
                 )
@@ -479,6 +493,9 @@ def cmd_sync() -> None:
             any_changed = True
     if "grok" in targets:
         if regen_grok():
+            any_changed = True
+    if "omp" in targets:
+        if regen_omp():
             any_changed = True
     if any_changed:
         print(f"Synced {', '.join(targets)} to currently-serving models.")
@@ -815,7 +832,7 @@ opts into systemd-managed auto-restart.
 
 On toggle, lmswitch syncs the list of currently-serving models to any tools
 you opted into during `lmswitch init` (opencode.json, hermes config.yaml, grok
-config.toml). Toggle `sync` to re-sync on demand.
+config.toml, omp models.yml). Toggle `sync` to re-sync on demand.
 
 By default, recipes whose model weights aren't downloaded on their serving
 node are hidden. View flags (work on `lmswitch` and `lmswitch list`):
