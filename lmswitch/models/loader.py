@@ -22,10 +22,11 @@ from lmswitch.system.io import (
 # "vllm" here. The HOST column's "dual" label (see below) is what tells the
 # two-node story.
 _TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm", "vllm-dual-ray": "vllm",
-                     "sglang": "sglang", "sglang-dual": "sglang",
+                    "sglang": "sglang", "sglang-dual": "sglang",
+                    "tensorfold": "tensorfold",
                      "exllamav3-dual": "exllamav3"}
 # Sizing: these read a weights *directory* (or shared HF cache) per node.
-_DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray", "sglang-dual", "exllamav3-dual")
+_DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray", "sglang-dual", "tensorfold", "exllamav3-dual")
 # Topology: everything that serves one model across both nodes, including
 # llama-dual — which is still sized like any other GGUF, because its weights
 # are one local file set that the head pushes over RPC.
@@ -74,11 +75,6 @@ def load_models() -> list[dict]:
             "size": size,
             "present": present,
             "restart": env.get("restart"),
-            # Opt-in image support, e.g. a multimodal checkpoint whose name
-            # carries no "vision"/"vl" marker. Survives `list --json`, so
-            # peers learn it through the cluster merge; sync honors it in
-            # _is_vision for omp (input/image) and opencode (attachment).
-            "vision": bool(env.get("vision", False)),
             "family": fam_label,
             "fam_order": fam_order,
             # Carried for llama-dual: the RAM row needs the local share to

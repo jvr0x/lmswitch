@@ -433,6 +433,20 @@ def test_filter_models_keeps_running_missing():
     assert [m["name"] for m in out] == ["a"]
 
 
+def test_filter_models_local_drops_tensorfold():
+    """tensorfold is a two-node runtime and must follow the dual view."""
+    models = [
+        {"name": "single", "runtime": "llama", "type": "gguf",
+         "host": "spark", "present": True, "running": False},
+        {"name": "glm-tf", "runtime": "tensorfold", "type": "tensorfold",
+         "host": "dual", "present": True, "running": False},
+    ]
+    local = cli_mod._filter_models(models, view="local")
+    dual = cli_mod._filter_models(models, view="dual")
+    assert [m["name"] for m in local] == ["single"]
+    assert [m["name"] for m in dual] == ["glm-tf"]
+
+
 def test_filter_models_local_drops_remote():
     """view="local" drops peer-owned entries and dual recipes."""
     models = [

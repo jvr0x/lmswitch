@@ -34,7 +34,7 @@ from lmswitch.system.checks import _listening_ports, _is_running
 from lmswitch.system import _get_sync_targets
 from lmswitch.system import usage as usage_mod
 from lmswitch.system.memory import _memory_check
-from lmswitch.models.loader import load_models
+from lmswitch.models.loader import _DUAL_HOST_RUNTIMES, load_models
 from lmswitch.models.cluster import gather_cluster_models
 from lmswitch.runtimes import (
     start_model,
@@ -134,15 +134,20 @@ def _filter_models(models: list[dict], view: str = "default",
 
     ``view`` selects which recipes to keep: ``"default"`` (everything),
     ``"local"`` (this node's single-box recipes — drops peer entries and
-    two-node dual recipes), or ``"dual"`` (vllm-dual recipes only). Unless
+    two-node dual recipes), or ``"dual"`` (two-node recipes only). Unless
     ``show_missing`` is set, recipes that are declared but whose weights
     aren't downloaded on their serving node (present=False and not running)
     are dropped.
     """
     out = []
     for m in models:
-        is_dual = m.get("runtime") in ("vllm-dual", "vllm-dual-ray", "sglang-dual",
-                                       "llama-dual", "exllamav3-dual") or m.get("type") == "dual"
+        # Same set the loader uses for the HOST "dual" label, plus rows that
+        # already carry that label (peer JSON) or the older type=dual marker.
+        is_dual = (
+            m.get("runtime") in _DUAL_HOST_RUNTIMES
+            or m.get("host") == "dual"
+            or m.get("type") == "dual"
+        )
         if view == "local" and (m.get("remote_host") or is_dual):
             continue
         if view == "dual" and not is_dual:
@@ -518,11 +523,6 @@ def cmd_serve(name: str) -> None:
         sys.exit(f"Config not found: {yaml_path}")
     yaml = _load_yaml(yaml_path)
     runtime = yaml.get("runtime", "llama")
-    if runtime == "exllamav3-dual":
-        # Job runtime, not a persistent server: there is nothing for
-        # systemd to supervise. Run one pipeline job instead.
-        sys.exit(f"{name} is an exllamav3-dual pipeline job (no port, no "
-                 f"restart); use `lmswitch on {name}` to run it once.")
     if runtime == "vllm":
         _start_vllm_foreground(name, yaml)
     elif runtime in ("vllm-dual", "vllm-dual-ray", "sglang-dual"):
@@ -1163,9 +1163,8 @@ def toggle(target: str, action: str) -> None:
     yaml = _load_yaml(yaml_path)
     runtime = yaml.get("runtime", "llama")
     verb = "start" if action == "on" else "stop"
-    port = yaml.get("port", "?")
-    where = "job (no port)" if not port else f"on port {port}"
-    print(f"{verb.capitalize()}ing {name} ({runtime}) {where} ...")
+    print(f"{verb.capitalize()}ing {name} ({runtime}) on port "
+          f"{yaml.get('port', '?')} ...")
     if action == "on":
         start_model(name, yaml)
     else:
