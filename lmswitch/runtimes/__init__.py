@@ -37,6 +37,7 @@ from lmswitch.runtimes.vllm_dual_ray import VLLMDualRayRuntime
 from lmswitch.runtimes.exllamav3_dual import Exllamav3DualRuntime
 from lmswitch.runtimes.sglang import SGLangRuntime
 from lmswitch.runtimes.sglang_dual import SGLangDualRuntime
+from lmswitch.runtimes.tensorfold import TensorFoldRuntime
 from lmswitch.runtimes.dual_serve import _start_dual_foreground
 from lmswitch.runtimes.systemd import _start_systemd
 from lmswitch.runtimes.wait import _wait_ready
@@ -64,6 +65,7 @@ __all__ = [
     "Exllamav3DualRuntime",
     "SGLangRuntime",
     "SGLangDualRuntime",
+    "TensorFoldRuntime",
 ]
 
 # Register runtimes — called at import time
@@ -75,6 +77,7 @@ runtime_registry.register("vllm-dual-ray", VLLMDualRayRuntime)
 runtime_registry.register("exllamav3-dual", Exllamav3DualRuntime)
 runtime_registry.register("sglang", SGLangRuntime)
 runtime_registry.register("sglang-dual", SGLangDualRuntime)
+runtime_registry.register("tensorfold", TensorFoldRuntime)
 
 
 def start_model(name: str, yaml: dict) -> None:

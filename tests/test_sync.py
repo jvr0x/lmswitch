@@ -15,7 +15,8 @@ from lmswitch.cli import cmd_on, cmd_off
 
 def _make_model_cfg(tmp: Path, name: str, port: int, ctx: int = 65536,
                     display: str = "", runtime: str = "llama",
-                    model_path: str = "dummy/model.gguf"):
+                    model_path: str = "dummy/model.gguf",
+                    vision: bool = False):
     if not display:
         display = name.replace("-", " ").title()
     cfg = (
@@ -25,6 +26,8 @@ def _make_model_cfg(tmp: Path, name: str, port: int, ctx: int = 65536,
         f"ctx: {ctx}\n"
         f'display_name: "{display}"\n'
     )
+    if vision:
+        cfg += "vision: true\n"
     p = tmp / f"{name}.yaml"
     p.write_text(cfg)
     return p
@@ -136,6 +139,31 @@ def test_regen_opencode_idempotent():
             regen_opencode()
             changed = regen_opencode()
         assert changed is False
+
+
+def test_regen_opencode_vision_flag_sets_attachment():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "plain-35b", 8089, 65536)
+        _make_model_cfg(models_dir, "flagged-35b", 8090, 65536,
+                        vision=True)
+        _write_lmswitch_config(models_dir, {"SYNC_OPENCODE": "true"})
+        opencode_cfg = tmp / "opencode.json"
+        opencode_cfg.write_text("{}")
+
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"plain-35b", "flagged-35b"})), \
+             mock.patch("lmswitch.sync.OPENCODE", opencode_cfg), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_opencode() is True
+
+        cfg = json.loads(opencode_cfg.read_text())
+        assert cfg["provider"]["flagged-35b"]["models"]["flagged-35b"].get(
+            "attachment") is True
+        assert "attachment" not in cfg["provider"]["plain-35b"]["models"]["plain-35b"]
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +501,34 @@ def test_regen_omp_writes_running_models():
         assert by_id["qwen3-vl-8b"]["input"] == ["text", "image"]
         assert "input" not in by_id["qwen3.6-35b"]
         assert "stopped-model" not in ids
+
+
+def test_regen_omp_vision_flag_without_vl_name():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        models_dir = tmp / "models"
+        models_dir.mkdir()
+        _make_model_cfg(models_dir, "plain-35b", 8089, 65536)
+        _make_model_cfg(models_dir, "flagged-35b", 8090, 65536,
+                        vision=True)
+        _write_lmswitch_config(models_dir, {"SYNC_OMP": "true"})
+
+        omp_cfg = tmp / "omp" / "models.yml"
+        omp_cfg.parent.mkdir()
+
+        with mock.patch("lmswitch.sync._is_running",
+                        side_effect=_mock_is_running({"plain-35b", "flagged-35b"})), \
+             mock.patch("lmswitch.sync.OMP_MODELS", omp_cfg), \
+             mock.patch("lmswitch.sync.SPARK_HOST", "spark-8912.local"), \
+             mock.patch("lmswitch.models.loader.CONF_DIR", models_dir), \
+             mock.patch("lmswitch.system.io.CONFIG_FILE", models_dir.parent / ".lmswitch"):
+            assert regen_omp() is True
+
+        providers = _omp_providers(omp_cfg)
+        by_id = {m["id"]: m for m in providers["lmswitch"]["models"]}
+        assert by_id["flagged-35b"]["input"] == ["text", "image"]
+        assert by_id["flagged-35b"]["imageInputDecoder"] == "stb"
+        assert "input" not in by_id["plain-35b"]
 
 
 def test_regen_omp_preserves_foreign_providers():

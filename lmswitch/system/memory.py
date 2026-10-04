@@ -34,6 +34,14 @@ def _memory_check(name: str, yaml: dict) -> tuple[bool, str]:
     # vLLM's gpu_memory_utilization — sizing it from the weights instead
     # would wave through a start that grabs ~121Gi of a 128Gi box and
     # hard-resets it.
+    if runtime == "tensorfold":
+        try:
+            need = float(yaml.get("memory_gib", 110))
+        except (ValueError, TypeError):
+            need = 110
+        what = f"TensorFold wants ~{need:.0f}Gi free before load"
+        return (avail >= need, "" if avail >= need
+                else f"{what}, but only {avail:.0f}Gi free")
     if runtime in ("sglang", "sglang-dual"):
         try:
             frac = float(yaml.get("mem_fraction_static", 0.95))

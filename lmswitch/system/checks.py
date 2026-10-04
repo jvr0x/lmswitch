@@ -135,6 +135,16 @@ def _is_running(name: str, runtime: str) -> bool:
             pass
     if runtime in _DOCKER_BACKED_RUNTIMES:
         return _docker_container(name, prefix) is not None
+    if runtime == "tensorfold":
+        from lmswitch.runtimes.tensorfold import container_name, container_running
+        cname = container_name({})
+        yaml_path = CONF_DIR / f"{name}.yaml"
+        if yaml_path.exists():
+            try:
+                cname = container_name(_load_yaml(yaml_path) or {})
+            except Exception:
+                pass
+        return container_running(cname)
     yaml_path = CONF_DIR / f"{name}.yaml"
     if yaml_path.exists():
         try:

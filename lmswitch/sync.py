@@ -31,9 +31,16 @@ def _host_label(hostname: str) -> str:
 
 
 def _is_vision(m: dict) -> bool:
-    """True for models whose name marks them as image-capable."""
+    """True for models that accept image input.
+
+    Name heuristic ("vision"/"vl") covers the fleet's VL-named recipes;
+    the recipe-level `vision: true` flag covers validated multimodal
+    checkpoints whose names carry no marker (e.g. apex-flash-1-dual,
+    smoke-tested with image input 2026-10-04).
+    """
     name = m["name"].lower()
-    return "vision" in name or re.search(r"\bvl\b", name) is not None
+    return ("vision" in name or re.search(r"\bvl\b", name) is not None
+            or bool(m.get("vision")))
 
 
 def _ctx_of(m: dict) -> int:
@@ -81,16 +88,22 @@ def regen_opencode() -> bool:
             ctx = int(m["ctx"]) if m["ctx"] else 65536
         except (ValueError, TypeError):
             ctx = 65536
+        model_entry = {
+            m["name"]: {
+                "name": m["display"],
+                "limit": {"context": ctx, "output": min(8192, ctx)},
+            }
+        }
+        if _is_vision(m):
+            # opencode gates image attachments on this flag; without it
+            # the client never sends pixels and the model truthfully
+            # reports it cannot see (apex-flash-1-dual, 2026-10-04).
+            model_entry[m["name"]]["attachment"] = True
         providers[m["name"]] = {
             "npm": "@ai-sdk/openai-compatible",
             "name": f"{m['display']} ({label})",
             "options": {"baseURL": base},
-            "models": {
-                m["name"]: {
-                    "name": m["display"],
-                    "limit": {"context": ctx, "output": min(8192, ctx)},
-                }
-            },
+            "models": model_entry,
         }
     cfg["provider"] = providers
     cfg["permission"] = {

@@ -75,6 +75,11 @@ def load_models() -> list[dict]:
             "size": size,
             "present": present,
             "restart": env.get("restart"),
+            # Opt-in image support, e.g. a multimodal checkpoint whose name
+            # carries no "vision"/"vl" marker. Survives `list --json`, so
+            # peers learn it through the cluster merge; sync honors it in
+            # _is_vision for omp (input/image) and opencode (attachment).
+            "vision": bool(env.get("vision", False)),
             "family": fam_label,
             "fam_order": fam_order,
             # Carried for llama-dual: the RAM row needs the local share to
