@@ -1,0 +1,35 @@
+# Example: pipeline-parallel EXL3 across TWO DGX Sparks (runtime: exllamav3-dual).
+#
+# This is a JOB runtime, not a server: `lmswitch on <id>` starts rank 1 over
+# SSH, runs rank 0 locally with --prompt/--max_new, streams the output, and
+# tears the worker down when the generation finishes. No port (port: 0 keeps
+# it out of every sync target), no `lmswitch serve`/systemd.
+runtime: exllamav3-dual
+model: "org/My-Model-EXL3"                          # HF id (label only)
+model_path: "~/models-gigabyte/org/My-Model-EXL3"   # path on THIS node
+worker_model_path: "~/models/org/My-Model-EXL3"     # path on the peer
+port: 0
+
+# --- cluster wiring (CX7 direct link) ---------------------------------------
+worker_host: Gigabyte            # ssh alias of the peer (BatchMode must work)
+master_addr: 10.100.224.2        # this node's CX7-link IP (--addrs rank0 first)
+worker_ip: 10.100.224.1          # peer's CX7-link IP
+transport: tcp                   # tcp (bring-up safe) or nccl (needs nccl: block)
+transport_port: 29650            # pipeline --port (NCCL rendezvous uses +7)
+# nccl:
+#   ifname: enp1s0f1np1
+#   hca: rocep1s0f1
+
+# --- pipeline shape ----------------------------------------------------------
+splits: "0:23,23:45"             # one a:b range per rank; each rank must start
+                                 # on a full indexer layer (Glm5Next DSA rule)
+ctx: 8192
+cache_quant: "4"                 # Q4 KV cache; omit for fp16 cache
+exllamav3_repo: "~/exllamav3"    # pinned checkout, same rev on BOTH nodes
+job_timeout: 3600                # max seconds for the rank-0 generation
+gate_timeout: 600                # max seconds to wait for worker "links up"
+
+# --- the single generation this job runs -------------------------------------
+prompt: "Explain pipeline parallelism in three sentences."
+max_new: 200
+display_name: "My Model EXL3 [DUAL 2x SPARK job]"

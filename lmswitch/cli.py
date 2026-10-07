@@ -142,7 +142,7 @@ def _filter_models(models: list[dict], view: str = "default",
     out = []
     for m in models:
         is_dual = m.get("runtime") in ("vllm-dual", "vllm-dual-ray", "sglang-dual",
-                                       "llama-dual") or m.get("type") == "dual"
+                                       "llama-dual", "exllamav3-dual") or m.get("type") == "dual"
         if view == "local" and (m.get("remote_host") or is_dual):
             continue
         if view == "dual" and not is_dual:
@@ -518,6 +518,11 @@ def cmd_serve(name: str) -> None:
         sys.exit(f"Config not found: {yaml_path}")
     yaml = _load_yaml(yaml_path)
     runtime = yaml.get("runtime", "llama")
+    if runtime == "exllamav3-dual":
+        # Job runtime, not a persistent server: there is nothing for
+        # systemd to supervise. Run one pipeline job instead.
+        sys.exit(f"{name} is an exllamav3-dual pipeline job (no port, no "
+                 f"restart); use `lmswitch on {name}` to run it once.")
     if runtime == "vllm":
         _start_vllm_foreground(name, yaml)
     elif runtime in ("vllm-dual", "vllm-dual-ray", "sglang-dual"):
@@ -1158,8 +1163,9 @@ def toggle(target: str, action: str) -> None:
     yaml = _load_yaml(yaml_path)
     runtime = yaml.get("runtime", "llama")
     verb = "start" if action == "on" else "stop"
-    print(f"{verb.capitalize()}ing {name} ({runtime}) on port "
-          f"{yaml.get('port', '?')} ...")
+    port = yaml.get("port", "?")
+    where = "job (no port)" if not port else f"on port {port}"
+    print(f"{verb.capitalize()}ing {name} ({runtime}) {where} ...")
     if action == "on":
         start_model(name, yaml)
     else:

@@ -67,6 +67,24 @@ def _memory_check(name: str, yaml: dict) -> tuple[bool, str]:
             need = size / 1024 ** 3 * share * 1.3
             what = (f"~{need:.0f}Gi (local {share:.0%} share of the "
                     f"weights + headroom)")
+        # Reason: exllamav3-dual is pipeline-parallel — each rank loads only
+        # its own layer slice (plus embed on rank 0, head on rank 1), so
+        # size the local slice from `splits`, not the whole checkpoint.
+        if runtime == "exllamav3-dual":
+            from lmswitch.runtimes.exllamav3_dual import pipeline_share
+            from lmswitch.system.io import _dir_size_and_present
+            import os
+            from pathlib import Path
+            mp = yaml.get("model_path", "")
+            dsize, _present = _dir_size_and_present(
+                Path(os.path.expanduser(os.path.expandvars(str(mp)))))
+            # Fall back to the whole-checkpoint estimate when the dir isn't
+            # visible yet (e.g. NFS mount still coming up at boot).
+            base_gib = dsize / 1024 ** 3 if dsize else size / 1024 ** 3
+            share = pipeline_share(yaml)
+            need = base_gib * share * 1.3
+            what = (f"~{need:.0f}Gi (local {share:.0%} pipeline slice of "
+                    f"the weights + headroom)")
     if avail < need:
         return False, f"{what}, but only {avail:.0f}Gi free"
     return True, ""

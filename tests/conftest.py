@@ -31,6 +31,7 @@ def _patch_conf_dir(data_root: Path) -> None:
     import lmswitch.runtimes.sglang as sglang_mod
     import lmswitch.runtimes.vllm_dual as vllm_dual_mod
     import lmswitch.runtimes.sglang_dual as sglang_dual_mod
+    import lmswitch.runtimes.exllamav3_dual as exllamav3_dual_mod
 
     for mod in (io_mod, cli_mod, loader_mod, sync_mod, rt_mod, llama_mod, vllm_mod,
                 sglang_mod):
@@ -42,6 +43,7 @@ def _patch_conf_dir(data_root: Path) -> None:
     # vllm_dual and sglang_dual only import RUN_DIR.
     vllm_dual_mod.RUN_DIR = data_root / "running"
     sglang_dual_mod.RUN_DIR = data_root / "running"
+    exllamav3_dual_mod.RUN_DIR = data_root / "running"
 
 
 @pytest.fixture(autouse=True)

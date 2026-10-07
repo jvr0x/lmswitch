@@ -34,6 +34,7 @@ from lmswitch.runtimes.llama_dual import LlamaDualRuntime
 from lmswitch.runtimes.vllm import VLLMRuntime, _vllm_args, _start_vllm_direct, _start_vllm_foreground
 from lmswitch.runtimes.vllm_dual import VLLMDualRuntime
 from lmswitch.runtimes.vllm_dual_ray import VLLMDualRayRuntime
+from lmswitch.runtimes.exllamav3_dual import Exllamav3DualRuntime
 from lmswitch.runtimes.sglang import SGLangRuntime
 from lmswitch.runtimes.sglang_dual import SGLangDualRuntime
 from lmswitch.runtimes.dual_serve import _start_dual_foreground
@@ -60,6 +61,7 @@ __all__ = [
     "VLLMRuntime",
     "VLLMDualRuntime",
     "VLLMDualRayRuntime",
+    "Exllamav3DualRuntime",
     "SGLangRuntime",
     "SGLangDualRuntime",
 ]
@@ -70,6 +72,7 @@ runtime_registry.register("llama-dual", LlamaDualRuntime)
 runtime_registry.register("vllm", VLLMRuntime)
 runtime_registry.register("vllm-dual", VLLMDualRuntime)
 runtime_registry.register("vllm-dual-ray", VLLMDualRayRuntime)
+runtime_registry.register("exllamav3-dual", Exllamav3DualRuntime)
 runtime_registry.register("sglang", SGLangRuntime)
 runtime_registry.register("sglang-dual", SGLangDualRuntime)
 

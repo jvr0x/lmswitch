@@ -10,9 +10,13 @@ lmswitch serves local LLMs from one YAML file per model in `ai-models/`. The
 `--served-model-name` and (for vLLM) the container name `vllm-<id>`. Drop a file
 in, run `lmswitch on <id>`. No code changes needed.
 
-Two runtimes:
+Three runtimes:
 - `runtime: llama` (default) → GGUF via `llama-server`, background process.
 - `runtime: vllm` → safetensors/quantized via `vllm-openai` Docker container.
+- `runtime: exllamav3-dual` → EXL3 pipeline-parallel across 2 Sparks as a
+  one-shot JOB (`lmswitch on` blocks, streams rank 0, tears down; `port: 0`,
+  no sync, no systemd). See `examples/exllamav3-dual.yaml`. Dual `vllm-dual` /
+  `sglang-dual` / `llama-dual` variants also exist for persistent servers.
 
 `model:` is **always a path relative to `MODELS_DIR`** (default `~/models`,
 override in `ai-models/.lmswitch`). For GGUF it points at the `.gguf` file (or
