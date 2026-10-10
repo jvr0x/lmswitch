@@ -251,7 +251,7 @@ def _dir_size_and_present(full: Path) -> tuple[int, bool]:
 def _model_size_and_present(rel: str, runtime: str) -> tuple[int, bool]:
     models_dir = _models_dir()
     full = models_dir / rel
-    if runtime in ("vllm", "sglang"):
+    if runtime in ("vllm", "sglang", "systemone"):
         return _dir_size_and_present(full)
     # GGUF
     if not full.exists():

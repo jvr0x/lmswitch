@@ -1,0 +1,12 @@
+# Decision model: LiquidAI d1-3B. Text and images. POST /v1/systemone.
+# Weights: ~/models/LiquidAI/d1-3B
+runtime: systemone
+kind: d1
+model: LiquidAI/d1-3B
+port: 8170
+ctx: 32768
+vision: true
+display_name: "LiquidAI d1-3B decision (text + image)"
+ready_timeout: 600
+alias: d1-3b
+python: ~/venvs/decision/bin/python

@@ -43,6 +43,11 @@ def _is_vision(m: dict) -> bool:
             or bool(m.get("vision")))
 
 
+def _is_chat(m: dict) -> bool:
+    """False for decision models, which do not speak the chat completions API."""
+    return bool(m.get("chat", True))
+
+
 def _ctx_of(m: dict) -> int:
     """Context window of a model config, falling back to 65536."""
     try:
@@ -77,7 +82,7 @@ def regen_opencode() -> bool:
 
     local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", _host_label(SPARK_HOST))
              for m in load_models()
-             if m["port"] != 0 and _is_running(m["name"], m["runtime"])]
+             if m["port"] != 0 and _is_chat(m) and _is_running(m["name"], m["runtime"])]
     remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
               _host_label(m.get("host") or m["remote_host"]))
               for m in _cluster_running_models()]
@@ -149,7 +154,7 @@ def regen_hermes() -> bool:
 
     all_models = load_models()
     running = [m for m in all_models
-              if m["port"] and _is_running(m["name"], m["runtime"])]
+              if m["port"] and _is_chat(m) and _is_running(m["name"], m["runtime"])]
     by_name = {m["name"]: m for m in running}
 
     non_vision = [m for m in running if not _is_vision(m)]
@@ -284,7 +289,7 @@ def regen_grok() -> bool:
 
     local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", "")
              for m in load_models()
-             if m["port"] != 0 and _is_running(m["name"], m["runtime"])]
+             if m["port"] != 0 and _is_chat(m) and _is_running(m["name"], m["runtime"])]
     remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
               f" [{_host_label(m.get('host') or m['remote_host'])}]")
               for m in _cluster_running_models()]
@@ -431,7 +436,7 @@ def regen_omp() -> bool:
 
     local = [(m, f"http://{SPARK_HOST}:{m['port']}/v1", _host_label(SPARK_HOST))
              for m in load_models()
-             if m["port"] != 0 and _is_running(m["name"], m["runtime"])]
+             if m["port"] != 0 and _is_chat(m) and _is_running(m["name"], m["runtime"])]
     remote = [(m, f"http://{m['serve_host']}:{m['port']}/v1",
               _host_label(m.get("host") or m["remote_host"]))
               for m in _cluster_running_models()]

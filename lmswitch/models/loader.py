@@ -24,7 +24,8 @@ from lmswitch.system.io import (
 _TYPE_BY_RUNTIME = {"vllm": "vllm", "vllm-dual": "vllm", "vllm-dual-ray": "vllm",
                     "sglang": "sglang", "sglang-dual": "sglang",
                     "tensorfold": "tensorfold",
-                     "exllamav3-dual": "exllamav3"}
+                     "exllamav3-dual": "exllamav3",
+                     "systemone": "decision"}
 # Sizing: these read a weights *directory* (or shared HF cache) per node.
 _DUAL_RUNTIMES = ("vllm-dual", "vllm-dual-ray", "sglang-dual", "tensorfold", "exllamav3-dual")
 # Topology: everything that serves one model across both nodes, including
@@ -80,6 +81,9 @@ def load_models() -> list[dict]:
             # peers learn it through the cluster merge; sync honors it in
             # _is_vision for omp (input/image) and opencode (attachment).
             "vision": bool(env.get("vision", False)),
+            # Decision models answer a schema. They are not chat completions,
+            # so config sync leaves them out of opencode, hermes, grok, and omp.
+            "chat": bool(env.get("chat", runtime != "systemone")),
             "family": fam_label,
             "fam_order": fam_order,
             # Carried for llama-dual: the RAM row needs the local share to

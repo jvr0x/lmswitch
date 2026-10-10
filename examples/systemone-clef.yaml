@@ -1,0 +1,12 @@
+# Decision model: Cloudflare Clef 27B. Text, images, and video.
+# Weights: ~/models/Cloudflare/clef  (~55 GB, bf16)
+runtime: systemone
+kind: clef
+model: Cloudflare/clef
+port: 8171
+ctx: 16384
+vision: true
+display_name: "Cloudflare Clef 27B decision (text + image + video)"
+ready_timeout: 1500
+alias: clef
+python: ~/venvs/decision/bin/python
