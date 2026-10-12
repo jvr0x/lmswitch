@@ -106,7 +106,11 @@ def _decide(body: dict) -> dict:
                 kwargs["images"] = images
             if video and _KIND == "d3":
                 kwargs["videos"] = [video]
-            result = _MODEL.system_one(state, questions, **kwargs)
+            if _KIND == "d3":
+                # d3's system_one takes keyword-only arguments.
+                result = _MODEL.system_one(state=state, questions=questions, **kwargs)
+            else:
+                result = _MODEL.system_one(state, questions, **kwargs)
             result["model"] = _NAME
         else:
             from joint_schema_model import systemone
