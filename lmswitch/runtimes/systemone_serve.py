@@ -97,7 +97,8 @@ def _decide(body: dict) -> dict:
     if not isinstance(questions, dict) or not questions:
         raise ValueError("questions must be a non-empty object")
     state = body.get("state", "")
-    with _LOCK:
+    import torch
+    with _LOCK, torch.inference_mode():
         if _KIND in ("d1", "d3"):
             if video and _KIND == "d1":
                 raise ValueError("d1-3B does not take video")
