@@ -1,0 +1,15 @@
+# Decision 3.0. kind: d3 uses the same system_one() call as d1, and also
+# accepts one video as a data URL. Weights are Hugging Face directories.
+#
+#   model: vllm-sr/d3-mini    # 4.5B, ~9 GB, port 8172
+#   model: vllm-sr/d3         # 27B, ~52 GB, port 8173
+runtime: systemone
+kind: d3
+model: vllm-sr/d3-mini
+port: 8172
+ctx: 32768
+vision: true
+display_name: "Decision 3.0 d3-mini 4B"
+ready_timeout: 600
+alias: d3-mini
+python: ~/venvs/decision/bin/python

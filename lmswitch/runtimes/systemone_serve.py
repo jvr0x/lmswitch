@@ -75,7 +75,7 @@ def _load() -> None:
     _NAME = os.environ.get("SYSTEMONE_NAME", Path(path).name)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float32 if device == "cpu" else torch.bfloat16
-    if _KIND == "d1":
+    if _KIND in ("d1", "d3"):
         from transformers import AutoModel
         _MODEL = AutoModel.from_pretrained(
             path, trust_remote_code=True, dtype=dtype).to(device).eval()
@@ -98,10 +98,15 @@ def _decide(body: dict) -> dict:
         raise ValueError("questions must be a non-empty object")
     state = body.get("state", "")
     with _LOCK:
-        if _KIND == "d1":
-            if video:
-                raise ValueError("d1-3B does not take video; use clef")
-            result = _MODEL.system_one(state, questions, images=images or None)
+        if _KIND in ("d1", "d3"):
+            if video and _KIND == "d1":
+                raise ValueError("d1-3B does not take video")
+            kwargs = {}
+            if images:
+                kwargs["images"] = images
+            if video and _KIND == "d3":
+                kwargs["videos"] = [video]
+            result = _MODEL.system_one(state, questions, **kwargs)
             result["model"] = _NAME
         else:
             from joint_schema_model import systemone
