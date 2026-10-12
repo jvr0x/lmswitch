@@ -41,6 +41,11 @@ class SystemOneRuntime(BaseRuntime):
         env["SYSTEMONE_PORT"] = str(port)
         env["SYSTEMONE_NAME"] = str(yaml.get("alias", name))
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        # ~/.cache/huggingface/modules is root-owned on this box, so the
+        # trust_remote_code copy of d1's modeling code cannot be created there.
+        modules = Path.home() / ".cache" / "huggingface-decision" / "modules"
+        modules.mkdir(parents=True, exist_ok=True)
+        env["HF_MODULES_CACHE"] = str(modules)
 
         print(f"Starting systemone {name} ({kind}) on port {port}...")
         print(f"  Model: {model_path}")
